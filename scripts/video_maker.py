@@ -108,17 +108,28 @@ def gerar_legenda_clip_palavra(palavras_json, largura, altura):
 def animar_personagem_com_audio(audio_path, duracao, posicao, imagens, fundo_w, fundo_h, nome):
     audio = AudioSegment.from_file(audio_path)
     chunks = make_chunks(audio, 300)
-    imgs = {k: imagem_padronizada(v, altura_personagem) for k,v in imagens.items()}
-    piscar = np.random.randint(1, len(chunks)-2) if duracao>5 and np.random.rand()<0.3 else -1
     frames = []
+    clip_fechada = imagem_padronizada(imagens["fechada"], altura_personagem)
+    clip_aberta = imagem_padronizada(imagens["aberta"], altura_personagem)
+    piscar = np.random.randint(1, len(chunks)-2) if duracao > 5 and np.random.rand() < 0.3 else -1
+
+    alternar = True
+
     for i, chunk in enumerate(chunks):
-        rms = chunk.rms
-        clip = imgs["piscar"] if i==piscar else imgs["aberta"] if rms>400 else imgs["fechada"]
-        iw, ih = clip.size
-        pos = (margem, fundo_h-ih-margem) if posicao=="esquerda" else (fundo_w-iw-margem, fundo_h-ih-margem)
-        frame = clip.with_position(pos).with_duration(0.3)
+        if i == piscar:
+            sprite = imagem_padronizada(imagens["piscar"], altura_personagem)
+        elif chunk.rms > 400:
+            sprite = clip_aberta if alternar else clip_fechada
+            alternar = not alternar
+        else:
+            sprite = clip_fechada
+
+        iw, ih = sprite.size
+        pos = (margem, fundo_h - ih - margem) if posicao == "esquerda" else (fundo_w - iw - margem, fundo_h - ih - margem)
+        frame = sprite.with_position(pos).with_duration(0.3)
         comp = CompositeVideoClip([frame], size=(fundo_w, fundo_h))
         frames.append(comp)
+
     return concatenate_videoclips(frames).with_duration(duracao)
 
 def ler_json_legenda(caminho):
