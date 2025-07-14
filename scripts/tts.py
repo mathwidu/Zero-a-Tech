@@ -17,6 +17,9 @@ client = ElevenLabs(api_key=api_key)
 
 # 📖 Lê o diálogo do arquivo
 def ler_dialogo():
+    if not os.path.exists(DIALOG_PATH):
+        print(f"❌ Arquivo de diálogo não encontrado: {DIALOG_PATH}")
+        return []
     with open(DIALOG_PATH, "r", encoding="utf-8") as f:
         linhas = f.readlines()
     return [linha.strip() for linha in linhas if linha.strip()]
@@ -37,10 +40,9 @@ def gerar_audio(texto: str, index: int, voice_name: str):
 
     # 🔁 Se a voz for do Zé Bot, ajusta velocidade
     if voice_name == VOZ_ZE:
-        voice_settings["speed"] = 1.0  # velocidade natural e fluída
+        voice_settings["speed"] = 1.0
 
     try:
-        # Conversão sem 'style', que não é aceito no seu plano
         audio_stream = client.text_to_speech.convert(
             text=texto,
             voice_id=voice.voice_id,
@@ -71,11 +73,13 @@ if __name__ == "__main__":
     print(f"💬 Total de falas: {len(falas)}")
 
     for i, fala in enumerate(falas, start=1):
-        if fala.startswith("João:"):
-            texto_limpo = fala[len("João:"):].strip()
+        personagem = fala.split(":", 1)[0].strip().lower()
+
+        if personagem == "joão":
+            texto_limpo = fala.split(":", 1)[1].strip()
             gerar_audio(texto_limpo, i, VOZ_JOAO)
-        elif fala.startswith("Zé Bot:"):
-            texto_limpo = fala[len("Zé Bot:"):].strip()
+        elif personagem in ["zé bot", "zébot"]:
+            texto_limpo = fala.split(":", 1)[1].strip()
             gerar_audio(texto_limpo, i, VOZ_ZE)
         else:
             print(f"⚠️ Fala {i} não identificada com personagem: {fala}")

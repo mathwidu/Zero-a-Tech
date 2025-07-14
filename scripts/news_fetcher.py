@@ -10,30 +10,44 @@ API_KEY = os.getenv("NEWSAPI_KEY")
 def get_google_news(api_key):
     url = "https://newsapi.org/v2/top-headlines"
     params = {
-        "category": "technology",   # usa categoria ao invés de query
-        "language": "en",           # em inglês pra garantir resultados
-        "pageSize": 3,
+        "category": "technology",   # Categoria tecnologia
+        "language": "en",           # Em inglês para garantir variedade
+        "pageSize": 3,              # Traz até 3 notícias
         "apiKey": api_key
     }
+
     response = requests.get(url, params=params)
-
-    # 🧪 Debug: imprime status e conteúdo da resposta
     print("🔍 Status code:", response.status_code)
-    data = response.json()
-    print("📦 Conteúdo da resposta JSON:")
-    print(data)
 
-    if "articles" not in data:
-        print("❌ Erro na resposta da NewsAPI:")
+    try:
+        data = response.json()
+    except ValueError:
+        print("❌ Erro ao interpretar JSON da resposta.")
         return []
 
-    return [f"{a['title']}: {a['url']}" for a in data["articles"]]
+    if "articles" not in data:
+        print("❌ Resposta inválida da NewsAPI:", data)
+        return []
+
+    noticias = []
+    for artigo in data["articles"]:
+        noticias.append({
+            "title": artigo.get("title", "").strip(),
+            "description": artigo.get("description", "").strip(),
+            "url": artigo.get("url", "").strip()
+        })
+
+    return noticias
 
 # 🧪 Execução de teste
 if __name__ == "__main__":
     print("📰 Google News (categoria: technology):")
-    google_news = get_google_news(API_KEY)
-    for n in google_news:
-        print(" -", n)
-    if not google_news:
-        print("⚠️ Nada encontrado na API da NewsAPI")
+    noticias = get_google_news(API_KEY)
+    
+    if not noticias:
+        print("⚠️ Nenhuma notícia encontrada.")
+    else:
+        for n in noticias:
+            print("\n📌 Título:", n["title"])
+            print("📝 Descrição:", n["description"])
+            print("🔗 Link:", n["url"])
