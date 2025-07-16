@@ -33,7 +33,7 @@ def get_google_news(api_key):
     for artigo in data["articles"]:
         noticias.append({
             "title": artigo.get("title", "").strip(),
-            "description": artigo.get("description", "").strip(),
+            "description": (artigo.get("description") or "").strip(),
             "url": artigo.get("url", "").strip()
         })
 

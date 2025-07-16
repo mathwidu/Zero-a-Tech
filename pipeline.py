@@ -28,6 +28,10 @@ scripts_iniciais = [
     ("scripts/tts.py", [])
 ]
 
+scripts_intermediarios = [
+    ("scripts/generate_caption.py", [])
+]
+
 scripts_finais = [
     ("scripts/generate_subtitles.py", []),
     ("scripts/video_maker.py", [])
@@ -94,11 +98,24 @@ if __name__ == "__main__":
         else:
             print(f"✔️ Já existe: {output_json}")
 
+    # ▶️ Scripts intermediários (ex: geração de legenda TikTok)
+    for script, args in scripts_intermediarios:
+        run_script(script, args)
+
+    # ▶️ Scripts finais
     for script, args in scripts_finais:
         run_script(script, args)
 
         print("\n🔎 Verificando arquivos esperados após esse passo:")
         for arquivo in arquivos_para_verificar:
             debug_arquivo(arquivo)
+
+    # 📲 Postar automaticamente no TikTok
+    try:
+        print("\n📲 Iniciando postagem no TikTok...")
+        from scripts.post_tiktok import postar_no_tiktok
+        postar_no_tiktok()
+    except Exception as e:
+        print(f"❌ Erro ao postar no TikTok: {e}")
 
     print("\n🎉 Pipeline finalizado com sucesso.")

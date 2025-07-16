@@ -16,7 +16,7 @@ def baixar_video_youtube(url, destino='assets/videos_fundo'):
 
 # Lista de vídeos recomendados (exemplo: satisfatórios / gameplays CC)
 videos_para_baixar = [
- 'https://www.youtube.com/watch?v=xKRNDalWE-E&list=PLJVvekmbcMxBCh1Cb997PA2hsrxmxdB6G'
+ 'https://www.youtube.com/watch?v=cWDpLJkXtlQ'
 ]
 
 if __name__ == "__main__":
