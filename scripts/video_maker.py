@@ -26,6 +26,7 @@ def construir_lista_falas():
         imagens = {
             "fechada": f"assets/personagens/{'joao' if nome == 'JOÃO' else 'zebot'}.png",
             "aberta": f"assets/personagens/{'joaoaberto' if nome == 'JOÃO' else 'zebot_aberto'}.png",
+            "aberta2": f"assets/personagens/{'joaoaberto' if nome == 'JOÃO' else 'zebot_aberto2'}.png",
             "piscar": f"assets/personagens/{'joaoaberto2' if nome == 'JOÃO' else 'zebot_piscar'}.png"
         }
         posicao = "esquerda" if nome == "JOÃO" else "direita"
@@ -35,7 +36,7 @@ def construir_lista_falas():
             "posicao": posicao,
             "nome": nome
         })
-    return lista_falas
+    return lista_falas[:]
 
 def imagem_padronizada(caminho, altura):
     return ImageClip(caminho).resized(height=altura).with_duration(0.1)
@@ -87,6 +88,7 @@ def animar_personagem_com_audio(audio_path, duracao, posicao, imagens, fundo_w, 
     frames = []
     clip_fechada = imagem_padronizada(imagens["fechada"], altura_personagem)
     clip_aberta = imagem_padronizada(imagens["aberta"], altura_personagem)
+    clip_aberta2 = imagem_padronizada(imagens["aberta2"], altura_personagem)
     piscar = np.random.randint(1, len(chunks)-2) if duracao > 5 and np.random.rand() < 0.3 else -1
     alternar = True
 
@@ -94,7 +96,7 @@ def animar_personagem_com_audio(audio_path, duracao, posicao, imagens, fundo_w, 
         if i == piscar:
             sprite = imagem_padronizada(imagens["piscar"], altura_personagem)
         elif chunk.rms > 400:
-            sprite = clip_aberta if alternar else clip_fechada
+            sprite = clip_aberta if alternar else clip_aberta2
             alternar = not alternar
         else:
             sprite = clip_fechada
