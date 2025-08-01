@@ -5,11 +5,12 @@ import random
 import numpy as np
 
 from moviepy import VideoFileClip, AudioFileClip, ImageClip, CompositeVideoClip, concatenate_videoclips
+
 from pydub import AudioSegment
 from pydub.utils import make_chunks
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-# ———— CONFIGURAÇÕES —————————————
+# ———— CONFIGURAÇÕES ———————————————————————
 fundo_path = random.choice(glob.glob("assets/videos_fundo/*.mp4"))
 saida_path = "output/video_final.mp4"
 altura_personagem = 800
@@ -36,7 +37,7 @@ def construir_lista_falas():
             "posicao": posicao,
             "nome": nome
         })
-    return lista_falas[:]
+    return lista_falas[:3]
 
 def imagem_padronizada(caminho, altura):
     return ImageClip(caminho).resized(height=altura).with_duration(0.1)
@@ -111,7 +112,16 @@ def ler_json_legenda(caminho):
     with open(caminho, "r", encoding="utf-8") as f:
         return json.load(f)
 
-# ———— INÍCIO DO PROCESSAMENTO —————————————
+def criar_borda_glow(imagem_path, tamanho_alvo, radius=20):
+    img = Image.open(imagem_path).convert("RGBA").resize(tamanho_alvo, Image.LANCZOS)
+    mask = Image.new("L", img.size, 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle([(0, 0), img.size], radius=radius, fill=255)
+    img.putalpha(mask)
+    img_borda = ImageOps.expand(img, border=4, fill=(255, 255, 255, 120))
+    return np.array(img_borda)
+
+# ———— INÍCIO DO PROCESSAMENTO ———————————————————————
 falas = construir_lista_falas()
 duracao_total_falas = sum(AudioFileClip(f["audio"]).duration for f in falas)
 
@@ -123,7 +133,7 @@ if fundo_video.duration > duracao_total_falas:
     inicio = random.uniform(0, fundo_video.duration - duracao_total_falas)
     fundo_video = fundo_video.subclipped(inicio, inicio + duracao_total_falas)
 else:
-    inicio = 0  # usa desde o início sem corte
+    inicio = 0
 
 cenas, t_acc = [], 0
 for i, f in enumerate(falas):
@@ -132,14 +142,41 @@ for i, f in enumerate(falas):
     fundo_c = fundo_video.subclipped(t_acc, t_acc + dur).with_audio(audio_clip).with_duration(dur)
     pers = animar_personagem_com_audio(f["audio"], dur, f["posicao"], f["imagens"], fundo_w, fundo_h, f["nome"])
 
+    imagem_ilustrativa = None
+    imagem_ilustrativa_path = f"output/imagem_{i+1:02}.png"
+
+    if os.path.exists(imagem_ilustrativa_path):
+        print(f"[DEBUG] Adicionando imagem estilizada para fala {i+1}")
+        altura_img = int(fundo_h * 0.4)
+        largura_img = int(altura_img * 0.85)
+        img_np = criar_borda_glow(imagem_ilustrativa_path, (largura_img, altura_img))
+
+        max_dur = min(3, dur)
+        imagem_ilustrativa = (
+            ImageClip(img_np)
+            .with_start(t_acc + 0.2)
+            .with_duration(max_dur)
+            .with_position(("center", int(fundo_h * 0.08)))
+            .with_opacity(0.85)
+        )
+    else:
+        print(f"[DEBUG] Nenhuma imagem ilustrativa para fala {i+1}")
+
     json_path = f"output/fala_{i+1:02}_words.json"
     if os.path.exists(json_path):
         palavras_json = ler_json_legenda(json_path)
         legenda_clip = gerar_legenda_clip_palavra(palavras_json, fundo_w, fundo_h)
-        cena = CompositeVideoClip([fundo_c, pers, legenda_clip], size=(fundo_w, fundo_h)).with_duration(dur)
+
+        camadas = [fundo_c]
+        if imagem_ilustrativa:
+            camadas.append(imagem_ilustrativa)
+        camadas += [pers, legenda_clip]
+
+        cena = CompositeVideoClip(camadas, size=(fundo_w, fundo_h)).with_duration(dur)
         cenas.append(cena)
     else:
         print(f"[AVISO] JSON não encontrado para fala {i+1}")
+
     t_acc += dur
 
 video = concatenate_videoclips(cenas)
