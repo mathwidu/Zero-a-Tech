@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from news_fetcher import get_google_news
 import openai
 import requests
+import json
 from bs4 import BeautifulSoup
 
 # 🔐 Carrega .env
@@ -10,14 +11,12 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 
-# Inicializa cliente OpenAI
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-# 🌐 Busca um contexto extra baseado no título
+# 🌐 Busca contexto adicional da notícia
 def buscar_contexto_google(titulo):
     query = f"https://www.google.com/search?q={titulo.replace(' ', '+')}"
     headers = {"User-Agent": "Mozilla/5.0"}
-    
     try:
         response = requests.get(query, headers=headers)
         soup = BeautifulSoup(response.text, "html.parser")
@@ -28,42 +27,43 @@ def buscar_contexto_google(titulo):
         print("⚠️ Erro ao buscar contexto:", e)
         return ""
 
-# 🧠 Gera diálogo com base no título + contexto extra
-def gerar_dialogo(titulo, contexto_extra=""):
+# 🧠 Gera diálogo em JSON estruturado com possíveis prompts de imagem
+def gerar_dialogo_struct(titulo, contexto_extra=""):
     prompt = f"""
-Você é um roteirista de podcast geek para TikTok. Crie um diálogo natural e espontâneo entre dois co-hosts:
+Você é um roteirista criativo para vídeos curtos no TikTok, usando dois personagens animados: JOÃO (curioso, animado) e ZÉ BOT (mais técnico, irônico e divertido). Sua tarefa é gerar um diálogo em formato JSON, onde cada fala pode opcionalmente ter uma imagem ilustrativa associada.
 
-- JOÃO: animado, curioso, puxa o tema da notícia, faz perguntas ou comentários leves é mais jovem.
-- ZÉ BOT: co-host mais técnico, mas ainda informal e divertido, responde e aprofunda o assunto de forma clara, sem ser didático demais, mas ainda ensinando de maneira leve.
+Regras:
+- Responda no formato JSON, como uma lista de objetos. Cada objeto deve ter:
+  - "personagem": "JOÃO" ou "ZÉ BOT"
+  - "fala": fala natural, estilo podcast leve e engraçado
+  - "imagem": descrição curta da imagem ilustrativa a ser gerada (pode ser null se não precisar)
 
-⚠️ IMPORTANTE:
-- É um podcast animado, estilo videocast no TikTok. O público só ouve os dois falando.
-- Não use descrições de cena, narração, nem ações visuais.
-- Escreva apenas o diálogo, como se fosse uma conversa entre dois amigos discutindo uma notícia da semana.
-- Comece com uma fala que chame a atenção (gancho). Pode ser uma pergunta intrigante, uma reação de surpresa ou algo que desperte curiosidade.
-- Use linguagem falada e natural, com gírias leves e interjeições (tipo ‘caraca’, ‘véi’, ‘meu Deus’, etc), como numa conversa entre amigos de verdade.
-
-- Evite exagero de piadas ou referências. Use no máximo uma referência por conversa, e só se fizer sentido.
-- Foque em explicar e comentar a notícia de forma leve e com personalidade.
--As vezes, quando o gancho for apropriado, faça uma explicação mais detalhada sobre o tema, mas mantenha o tom informal.
-- Inclua um breve convite para curtir ou seguir no meio do diálogo, de forma natural.
-- Sempre peça que os ouvintes se inscrevam e comentem no final.
+- Comece com uma fala de impacto que prenda a atenção (gancho).
+- Use expressões naturais e descontraídas ("véi", "pô", "caraca", "mano", etc).
+- A cada 2 ou 3 falas, inclua uma que poderia ter uma imagem complementar.
+- Seja criativo na descrição da imagem, pensando em como ela ilustraria a fala.
+- NÃO escreva narração ou descrições fora das falas. Apenas JSON puro.
+- Feche com uma fala incentivando o público a comentar ou seguir o canal.
+-Gere sempre pelo menos 10 falas, mas sinta-se livre para criar mais se necessário.
 Assunto da conversa: {titulo}
 Contexto adicional: {contexto_extra}
-
-Formato: Só falas, no estilo de um podcast informal sobre tecnologia.
-Use: Tecnicas para manter o diálogo fluido e natural, como perguntas abertas, respostas curtas e interações espontâneas.
-Dicas: Tente prender o publico com curiosidades, perguntas provocativas e comentários engraçados.
-Tamanho: entre 15 e 20 falas no total.
+Formato de saída: JSON com os campos "personagem", "fala", "imagem"
 """
-
-    resposta = client.chat.completions.create(
+    response = client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.85
+        temperature=0.9
     )
 
-    return resposta.choices[0].message.content
+    content = response.choices[0].message.content
+
+    try:
+        estrutura = json.loads(content)
+        return estrutura
+    except json.JSONDecodeError as e:
+        print("❌ Erro ao decodificar JSON gerado pela IA:", e)
+        print("📝 Resposta recebida:\n", content)
+        return []
 
 # 🚀 Execução principal
 if __name__ == "__main__":
@@ -74,7 +74,6 @@ if __name__ == "__main__":
         print("❌ Nenhuma notícia encontrada.")
         exit()
 
-    # Pega os dados da primeira notícia
     noticia = noticias[0]
     titulo = noticia["title"]
     descricao = noticia.get("description", "")
@@ -82,25 +81,25 @@ if __name__ == "__main__":
 
     print(f"\n🎯 Gerando diálogo sobre: {titulo}\n🔗 {link}\n")
 
-    # Busca contexto adicional
     contexto_google = buscar_contexto_google(titulo)
-    if not contexto_google.strip():
-        contexto_completo = descricao
-    else:
-        contexto_completo = f"{descricao}\n\n{contexto_google}"
+    contexto_completo = f"{descricao}\n\n{contexto_google}" if contexto_google.strip() else descricao
 
-    dialogo = gerar_dialogo(titulo, contexto_completo)
+    dialogo_estruturado = gerar_dialogo_struct(titulo, contexto_completo)
 
-    # Valida se o diálogo foi gerado
-    if not dialogo.strip():
-        print("❌ Nenhum diálogo foi gerado.")
+    if not dialogo_estruturado:
+        print("❌ Nenhum diálogo estruturado foi gerado.")
         exit()
 
-    # 💾 Salva o diálogo
     os.makedirs("output", exist_ok=True)
-    with open("output/dialogo.txt", "w", encoding="utf-8") as f:
-        f.write(dialogo)
 
-    # 📺 Também imprime no terminal
-    print("✅ Diálogo gerado com sucesso:\n")
-    print(dialogo)
+    with open("output/dialogo_estruturado.json", "w", encoding="utf-8") as f:
+        json.dump(dialogo_estruturado, f, indent=2, ensure_ascii=False)
+
+    print("✅ Diálogo estruturado salvo com sucesso em JSON.")
+
+    # Também salva um .txt simples com as falas
+    with open("output/dialogo.txt", "w", encoding="utf-8") as f:
+        for linha in dialogo_estruturado:
+            f.write(f"{linha['personagem']}: {linha['fala']}\n")
+
+    print("✅ Diálogo tradicional salvo em dialogo.txt.")
