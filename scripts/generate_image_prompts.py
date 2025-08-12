@@ -11,6 +11,16 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
+# 🎯 Parâmetros configuráveis
+PROMPT_PREFIX = os.getenv(
+    "IMAGE_PROMPT_PREFIX",
+    "cartoon minimalista em tons pastéis"
+)
+NEGATIVE_PROMPT = os.getenv(
+    "IMAGE_NEGATIVE_PROMPT",
+    "texto, marcas d'água, logotipos, objetos indesejados"
+)
+
 # 🗂️ Caminhos
 dialogo_path = Path("output/dialogo_estruturado.json")
 output_dir_raw = Path("assets/imagens_geradas")
@@ -33,15 +43,6 @@ def padronizar_imagem(path_img, saida_path, tamanho=(1024, 1024)):
         img = img.resize(tamanho, Image.LANCZOS)
         img.save(saida_path)
 
-# 🧠 Decide o estilo com base no conteúdo da imagem
-def classificar_estilo(prompt_base):
-    realistas = [
-        "iphone", "apple", "android", "samsung", "neuralink", "elon musk", "oculus",
-        "carro", "google", "tecnologia", "inteligência artificial", "chip", "realidade virtual",
-        "servidor", "smartphone", "chatgpt", "openai"
-    ]
-    return "realista" if any(p in prompt_base.lower() for p in realistas) else "cartoon"
-
 # 🎨 Geração de imagens
 contador = 1
 for i, fala in enumerate(falas):
@@ -50,29 +51,17 @@ for i, fala in enumerate(falas):
     if not prompt_base:
         continue  # pula falas sem imagem
 
-    estilo = classificar_estilo(prompt_base)
+    prompt_completo = f"{PROMPT_PREFIX}, {prompt_base}"
 
-    if estilo == "realista":
-        prompt_completo = (
-            f"{prompt_base}. "
-            "Ultra-realistic photography, cinematic lighting, highly detailed render, "
-            "shallow depth of field, realistic background, natural colors, DSLR camera quality, "
-            "sharp focus, 1024x1024 resolution, no text, clean and clear presentation."
-        )
-    else:
-        prompt_completo = (
-            f"{prompt_base}. "
-            "Ultra expressive cartoon style, exaggerated facial features, bright saturated colors, clean vector look, "
-            "meme-like energy, centered composition, pop art background, thick outlines, modern youth aesthetic, "
-            "inspired by viral TikToks and animated memes, 1024x1024 resolution, no text, high visual impact."
-        )
-
-    print(f"\n🖼️ Gerando imagem {contador} ({estilo.upper()}):\n{prompt_completo}\n")
+    print(
+        f"\n🖼️ Gerando imagem {contador}:\n{prompt_completo}\n🚫 Negative prompt: {NEGATIVE_PROMPT}\n"
+    )
 
     try:
         response = client.images.generate(
             model="dall-e-3",
             prompt=prompt_completo,
+            negative_prompt=NEGATIVE_PROMPT,
             n=1,
             size="1024x1024",
             response_format="url"
