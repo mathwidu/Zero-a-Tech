@@ -1,103 +1,198 @@
-import os
-import json
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os, json, re, base64, time
+from pathlib import Path
+from typing import Dict, Any, List, Tuple
+from PIL import Image
 import requests
 from dotenv import load_dotenv
-from pathlib import Path
-from PIL import Image
-import openai
+from openai import OpenAI
 
-# 🔐 Carrega as chaves do .env
+# ──────────────────────────────────────────────────────────────────────────────
+# Config
+# ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# 🗂️ Caminhos
-dialogo_path = Path("output/dialogo_estruturado.json")
-output_dir_raw = Path("assets/imagens_geradas")
-output_dir_final = Path("assets/imagens_geradas_padronizadas")
-output_para_video = Path("output")
-output_dir_raw.mkdir(parents=True, exist_ok=True)
-output_dir_final.mkdir(parents=True, exist_ok=True)
-output_para_video.mkdir(parents=True, exist_ok=True)
+DIALOGO_JSON_PATH = Path("output/dialogo_estruturado.json")
+PLANO_JSON_PATH   = Path("output/imagens_plano.json")          # opcional, mas recomendado
+OUT_RAW           = Path("assets/imagens_geradas")
+OUT_FINAL         = Path("assets/imagens_geradas_padronizadas")
+OUT_FOR_VIDEO     = Path("output")                              # cópia quadrada para o vídeo
+MANIFEST_PATH     = Path("output/imagens_manifest.json")
 
-# 📤 Carrega o diálogo estruturado
-with dialogo_path.open("r", encoding="utf-8") as f:
-    falas = json.load(f)
+SIZE = (1024, 1024)  # tamanho padrão
 
-print(f"🔍 Total de falas no roteiro: {len(falas)}")
+for p in (OUT_RAW, OUT_FINAL, OUT_FOR_VIDEO):
+    p.mkdir(parents=True, exist_ok=True)
 
-# 🧼 Função para padronizar imagens com Pillow
-def padronizar_imagem(path_img, saida_path, tamanho=(1024, 1024)):
-    with Image.open(path_img) as img:
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def padronizar_imagem(src: Path, dst: Path, size: Tuple[int,int]=(1024,1024)):
+    with Image.open(src) as img:
         img = img.convert("RGBA")
-        img = img.resize(tamanho, Image.LANCZOS)
-        img.save(saida_path)
+        img = img.resize(size, Image.LANCZOS)
+        img.save(dst)
 
-# 🧠 Decide o estilo com base no conteúdo da imagem
-def classificar_estilo(prompt_base):
+def load_json(path: Path, default):
+    if path.exists():
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    return default
+
+def sanitize_prompt(p: str) -> str:
+    if not p:
+        return ""
+    # remove pedidos de texto / aspas
+    p = re.sub(r"com\s+um\s+texto\s+que\s+diz[^,.]*[.,]?", "", p, flags=re.I)
+    p = re.sub(r"selo\s+de\s+['“\"].*?['”\"]", "selo genérico sem texto", p, flags=re.I)
+    p = re.sub(r"com\s+palavra[s]?\s+['“\"].*?['”\"]", "sem texto", p, flags=re.I)
+    p = re.sub(r"\btexto\b.*?(?:[.,]|$)", "", p, flags=re.I)
+
+    # generalizar marcas
+    subs = {
+        r"\bSamsung\b": "marca de tecnologia (genérica)",
+        r"\bGalaxy\b": "smartphone topo de linha (genérico)",
+        r"\bApple\b": "marca de tecnologia (genérica)",
+        r"\biPhone\b": "smartphone topo de linha (genérico)",
+        r"\bNetflix\b": "serviço de streaming (genérico)",
+        r"\bSpotify\b": "serviço de música (genérico)",
+        r"\bGoogle\b": "empresa de tecnologia (genérica)",
+        r"\bYouTube\b": "plataforma de vídeos (genérica)",
+    }
+    for patt, repl in subs.items():
+        p = re.sub(patt, repl, p, flags=re.I)
+
+    # impedir texto/logos
+    no_text = "sem texto, sem logotipos, sem marcas registradas, fundo limpo"
+    if no_text.lower() not in p.lower():
+        p = f"{p.strip()} | {no_text}"
+
+    # limpeza: remover palavras duplicadas consecutivas (ex.: "smartphone smartphone")
+    p = re.sub(r"\b(\w+)(\s+\1\b)+", r"\1", p, flags=re.I)
+
+    # se sobrou "selo genérico sem" sem "texto", completa:
+    p = re.sub(r"selo genérico sem\b(?!\s*texto)", "selo genérico sem texto", p, flags=re.I)
+
+    return re.sub(r"\s+", " ", p).strip()
+
+def build_style_prefix(plano: Dict[str,Any]) -> str:
+    est = plano.get("estilo_global", {}) or {}
+    paleta = est.get("paleta", "").strip()
+    estetica = est.get("estetica", "").strip()
+    nota = est.get("nota", "").strip()
+    parts = []
+    if estetica: parts.append(estetica)
+    if paleta:   parts.append(f"cores: {paleta}")
+    if nota:     parts.append(nota)
+    # regra padrão de clareza/legibilidade
+    parts.append("composição centrada, legível em tela pequena, iluminação balanceada")
+    return ", ".join(parts)
+
+def choose_style_tail(prompt_base: str) -> str:
+    """Rabo de prompt conforme tipo: realista x ilustrativo."""
     realistas = [
-        "iphone", "apple", "android", "samsung", "neuralink", "elon musk", "oculus",
-        "carro", "google", "tecnologia", "inteligência artificial", "chip", "realidade virtual",
-        "servidor", "smartphone", "chatgpt", "openai"
+        "smartphone", "computador", "drone", "carro", "servidor",
+        "fotografia", "produto", "dispositivo", "hardware"
     ]
-    return "realista" if any(p in prompt_base.lower() for p in realistas) else "cartoon"
-
-# 🎨 Geração de imagens
-contador = 1
-for i, fala in enumerate(falas):
-    prompt_base = fala.get("imagem")
-
-    if not prompt_base:
-        continue  # pula falas sem imagem
-
-    estilo = classificar_estilo(prompt_base)
-
-    if estilo == "realista":
-        prompt_completo = (
-            f"{prompt_base}. "
-            "Ultra-realistic photography, cinematic lighting, highly detailed render, "
-            "shallow depth of field, realistic background, natural colors, DSLR camera quality, "
-            "sharp focus, 1024x1024 resolution, no text, clean and clear presentation."
-        )
+    is_real = any(w in prompt_base.lower() for w in realistas)
+    if is_real:
+        return ("estilo foto editorial realista, iluminação cinematográfica, alta nitidez, "
+                "profundidade de campo, sem texto, sem logotipos, 1024x1024")
     else:
-        prompt_completo = (
-            f"{prompt_base}. "
-            "Ultra expressive cartoon style, exaggerated facial features, bright saturated colors, clean vector look, "
-            "meme-like energy, centered composition, pop art background, thick outlines, modern youth aesthetic, "
-            "inspired by viral TikToks and animated memes, 1024x1024 resolution, no text, high visual impact."
-        )
+        return ("ilustração vetorial/flat moderna, traços limpos, cores vivas porém equilibradas, "
+                "sombras sutis, sem texto, sem logotipos, 1024x1024")
 
-    print(f"\n🖼️ Gerando imagem {contador} ({estilo.upper()}):\n{prompt_completo}\n")
+def generate_image(prompt: str, idx: int, tries: int = 2) -> Path:
+    """Gera imagem com gpt-image-1 (b64) com retry simples."""
+    last_err = None
+    for attempt in range(1, tries+1):
+        try:
+            resp = client.images.generate(
+                model="gpt-image-1",
+                prompt=prompt,
+                size="1024x1024",  # garante quadrado
+                background="transparent"
+            )
+            b64 = resp.data[0].b64_json
+            raw_path = OUT_RAW / f"img_raw_{idx:02}.png"
+            with open(raw_path, "wb") as f:
+                f.write(base64.b64decode(b64))
+            return raw_path
+        except Exception as e:
+            last_err = e
+            # backoff curto
+            time.sleep(1.2 * attempt)
+    raise last_err
 
-    try:
-        response = client.images.generate(
-            model="dall-e-3",
-            prompt=prompt_completo,
-            n=1,
-            size="1024x1024",
-            response_format="url"
-        )
-        url = response.data[0].url
+# ──────────────────────────────────────────────────────────────────────────────
+# Execução
+# ──────────────────────────────────────────────────────────────────────────────
 
-        # salva imagem original
-        nome_raw = output_dir_raw / f"img_raw_{contador:02}.png"
-        img_data = requests.get(url).content
-        with open(nome_raw, "wb") as f:
-            f.write(img_data)
+def main():
+    falas = load_json(DIALOGO_JSON_PATH, [])
+    if not falas:
+        print("❌ 'output/dialogo_estruturado.json' não encontrado ou vazio.")
+        return
 
-        # padroniza imagem
-        nome_final = output_dir_final / f"img_{contador:02}.png"
-        padronizar_imagem(nome_raw, nome_final)
-        print(f"✅ Imagem padronizada salva em: {nome_final}")
+    plano = load_json(PLANO_JSON_PATH, {"estilo_global": {}, "imagens": []})
+    style_prefix = build_style_prefix(plano)
 
-        # salva para o vídeo maker
-        video_final_path = output_para_video / f"imagem_{contador:02}.png"
-        padronizar_imagem(nome_raw, video_final_path)
-        print(f"📎 Imagem copiada para vídeo maker: {video_final_path}")
+    # índice -> prompt do plano
+    prompts_por_linha = {it["linha"]: it["prompt"] for it in plano.get("imagens", []) if "linha" in it and "prompt" in it}
 
-        contador += 1
+    print(f"🔎 Falas: {len(falas)} | Imagens planejadas: {len(prompts_por_linha)}")
+    manifest = {"itens": []}
+    contador = 1
 
-    except Exception as e:
-        print(f"❌ Erro ao gerar imagem para fala {i}: {e}")
+    for i, fala in enumerate(falas):
+        base = fala.get("imagem")
+        if not base:
+            # sem imagem nessa fala
+            continue
 
-print("\n🏁 Fim da geração de imagens.")
+        # preferir prompt do plano (já existente no teu JSON), se houver
+        plano_prompt = prompts_por_linha.get(i, base)
+        plano_prompt = sanitize_prompt(plano_prompt)
+
+        # montar prompt final com estilo global + cauda por tipo
+        prompt_final = f"{style_prefix}. {plano_prompt}. {choose_style_tail(plano_prompt)}"
+        print(f"\n🖼️ [{contador}] Fala #{i} → Prompt:\n{prompt_final}\n")
+
+        try:
+            raw_path = generate_image(prompt_final, contador, tries=3)
+
+            # padroniza/copia
+            final_path = OUT_FINAL / f"img_{contador:02}.png"
+            padronizar_imagem(raw_path, final_path, SIZE)
+
+            video_path = OUT_FOR_VIDEO / f"imagem_{contador:02}.png"
+            padronizar_imagem(raw_path, video_path, SIZE)
+
+            print(f"✅ Salvo: {final_path} | Copiado p/ vídeo: {video_path}")
+
+            manifest["itens"].append({
+                "idx_global": contador,
+                "fala_index": i,
+                "personagem": fala.get("personagem"),
+                "fala": fala.get("fala"),
+                "prompt_usado": prompt_final,
+                "arquivo_final": str(final_path),
+                "arquivo_video": str(video_path)
+            })
+            contador += 1
+
+        except Exception as e:
+            print(f"❌ Erro ao gerar imagem da fala {i}: {e}")
+
+    with MANIFEST_PATH.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+    print(f"\n🧾 Manifest salvo em: {MANIFEST_PATH}")
+    print("🏁 Fim da geração de imagens.")
+
+if __name__ == "__main__":
+    main()

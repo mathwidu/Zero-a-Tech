@@ -16,6 +16,17 @@ saida_path = "output/video_final.mp4"
 altura_personagem = 800
 margem = 50
 fonte_padrao = "assets/fonts/LuckiestGuy-Regular.ttf"
+MANIFEST_PATH = "output/imagens_manifest.json"
+
+def carregar_manifest():
+    if os.path.exists(MANIFEST_PATH):
+        with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return { item["fala_index"]: item["arquivo_video"] for item in data.get("itens", []) }
+    return {}
+
+manifest_map = carregar_manifest()
+print(f"[DEBUG] imagens no manifest: {len(manifest_map)}")
 
 def construir_lista_falas():
     arquivos_audio = sorted(glob.glob("output/fala_*.mp3"))
@@ -37,7 +48,7 @@ def construir_lista_falas():
             "posicao": posicao,
             "nome": nome
         })
-    return lista_falas[:3]
+    return lista_falas[:]
 
 def imagem_padronizada(caminho, altura):
     return ImageClip(caminho).resized(height=altura).with_duration(0.1)
@@ -112,14 +123,15 @@ def ler_json_legenda(caminho):
     with open(caminho, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def criar_borda_glow(imagem_path, tamanho_alvo, radius=20):
+def criar_borda_glow(imagem_path, tamanho_alvo):
+    """Carrega a imagem preservando o canal alfa original e redimensiona para o tamanho desejado."""
     img = Image.open(imagem_path).convert("RGBA").resize(tamanho_alvo, Image.LANCZOS)
-    mask = Image.new("L", img.size, 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle([(0, 0), img.size], radius=radius, fill=255)
-    img.putalpha(mask)
-    img_borda = ImageOps.expand(img, border=4, fill=(255, 255, 255, 120))
-    return np.array(img_borda)
+    rgba = np.array(img)  # H×W×4
+    rgb = rgba[..., :3]
+    alpha = rgba[..., 3].astype(np.float32) / 255.0  # 0–1
+    return rgb, alpha
+
+
 
 # ———— INÍCIO DO PROCESSAMENTO ———————————————————————
 falas = construir_lista_falas()
@@ -143,22 +155,31 @@ for i, f in enumerate(falas):
     pers = animar_personagem_com_audio(f["audio"], dur, f["posicao"], f["imagens"], fundo_w, fundo_h, f["nome"])
 
     imagem_ilustrativa = None
-    imagem_ilustrativa_path = f"output/imagem_{i+1:02}.png"
+    imagem_ilustrativa_path = manifest_map.get(i)  # pega o arquivo certo pelo índice da fala
 
-    if os.path.exists(imagem_ilustrativa_path):
-        print(f"[DEBUG] Adicionando imagem estilizada para fala {i+1}")
+    if imagem_ilustrativa_path and os.path.exists(imagem_ilustrativa_path):
+        print(f"[DEBUG] Adicionando imagem estilizada para fala {i+1}: {imagem_ilustrativa_path}")
         altura_img = int(fundo_h * 0.4)
         largura_img = int(altura_img * 0.85)
-        img_np = criar_borda_glow(imagem_ilustrativa_path, (largura_img, altura_img))
+        rgb_np, alpha_np = criar_borda_glow(imagem_ilustrativa_path, (largura_img, altura_img))
 
-        max_dur = min(3, dur)
+        max_dur = min(3, dur)  # duração da imagem no início da fala
+
+        # 🔧 FIX: empilha o alfa (H×W) em 3 canais para o to_mask()
+        alpha_u8 = (alpha_np * 255).astype("uint8")               # H×W (0–255)
+        alpha_rgb = np.dstack([alpha_u8, alpha_u8, alpha_u8])     # H×W×3
+
+        mask_clip = ImageClip(alpha_rgb).to_mask().with_duration(max_dur)
+
         imagem_ilustrativa = (
-            ImageClip(img_np)
-            .with_start(t_acc + 0.2)
+            ImageClip(rgb_np)
+            .with_mask(mask_clip)
+            .with_start(0.2)  # relativo à cena
             .with_duration(max_dur)
             .with_position(("center", int(fundo_h * 0.08)))
             .with_opacity(0.85)
         )
+
     else:
         print(f"[DEBUG] Nenhuma imagem ilustrativa para fala {i+1}")
 
