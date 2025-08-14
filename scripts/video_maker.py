@@ -1,45 +1,81 @@
-import os
-import glob
-import json
-import random
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os, glob, json, random
 import numpy as np
 
 from moviepy import VideoFileClip, AudioFileClip, ImageClip, CompositeVideoClip, concatenate_videoclips
-
 from pydub import AudioSegment
 from pydub.utils import make_chunks
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 
-# ———— CONFIGURAÇÕES ———————————————————————
+# ———— CONFIG ————————————————————————————————
 fundo_path = random.choice(glob.glob("assets/videos_fundo/*.mp4"))
 saida_path = "output/video_final.mp4"
 altura_personagem = 800
 margem = 50
 fonte_padrao = "assets/fonts/LuckiestGuy-Regular.ttf"
+
+DIALOGO_PATH  = "output/dialogo_estruturado.json"
 MANIFEST_PATH = "output/imagens_manifest.json"
 
+# ———— JSON helpers ———————————————————————————
+def _load_json(path, default):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return default
+
+def ler_dialogo():
+    dialogo = _load_json(DIALOGO_PATH, [])
+    lines_with_image_1b = [i for i, it in enumerate(dialogo, start=1) if it.get("imagem")]
+    ord_by_line = {ln: k for k, ln in enumerate(lines_with_image_1b, start=1)}  # 1ª fala com imagem -> 1, etc.
+    return dialogo, set(lines_with_image_1b), ord_by_line
+
 def carregar_manifest():
-    if os.path.exists(MANIFEST_PATH):
-        with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return { item["fala_index"]: item["arquivo_video"] for item in data.get("itens", []) }
-    return {}
+    data = _load_json(MANIFEST_PATH, {"itens": []})
+    imgs, times = {}, {}
+    for it in data.get("itens", []):
+        try:
+            ln = int(it.get("fala_index"))
+        except Exception:
+            continue
+        if ln < 1:
+            continue
+        if it.get("arquivo_video"):
+            imgs[ln] = it["arquivo_video"]
+        if it.get("t_inicio") is not None and it.get("t_fim") is not None:
+            times[ln] = (float(it["t_inicio"]), float(it["t_fim"]))
+    return imgs, times
 
-manifest_map = carregar_manifest()
-print(f"[DEBUG] imagens no manifest: {len(manifest_map)}")
+def fallback_img_for_line(line_1b, ord_by_line):
+    """Se faltar imagem no manifest, usa output/imagem_{ord}.png pelo ordinal daquela fala."""
+    if line_1b not in ord_by_line:
+        return None
+    ord_pos = ord_by_line[line_1b]  # 1..N
+    return f"output/imagem_{ord_pos:02}.png"
 
+def pegar_tempo(line_1b, dur, times):
+    if line_1b in times:
+        t0, t1 = times[line_1b]
+    else:
+        t0, t1 = 0.2, min(3.0, dur)
+    t0 = max(0.0, min(t0, dur))
+    t1 = max(t0 + 0.05, min(t1, dur))
+    return t0, t1
+
+# ———— BOCA/LEGENDAS ———————————————————————————
 def construir_lista_falas():
     arquivos_audio = sorted(glob.glob("output/fala_*.mp3"))
     personagens = ["JOÃO", "ZÉ BOT"]
     lista_falas = []
-
     for i, caminho in enumerate(arquivos_audio):
         nome = personagens[i % 2]
         imagens = {
             "fechada": f"assets/personagens/{'joao' if nome == 'JOÃO' else 'zebot'}.png",
-            "aberta": f"assets/personagens/{'joaoaberto' if nome == 'JOÃO' else 'zebot_aberto'}.png",
+            "aberta":  f"assets/personagens/{'joaoaberto' if nome == 'JOÃO' else 'zebot_aberto'}.png",
             "aberta2": f"assets/personagens/{'joaoaberto' if nome == 'JOÃO' else 'zebot_aberto2'}.png",
-            "piscar": f"assets/personagens/{'joaoaberto2' if nome == 'JOÃO' else 'zebot_piscar'}.png"
+            "piscar":  f"assets/personagens/{'joaoaberto2' if nome == 'JOÃO' else 'zebot_piscar'}.png"
         }
         posicao = "esquerda" if nome == "JOÃO" else "direita"
         lista_falas.append({
@@ -99,7 +135,7 @@ def animar_personagem_com_audio(audio_path, duracao, posicao, imagens, fundo_w, 
     chunks = make_chunks(audio, 300)
     frames = []
     clip_fechada = imagem_padronizada(imagens["fechada"], altura_personagem)
-    clip_aberta = imagem_padronizada(imagens["aberta"], altura_personagem)
+    clip_aberta  = imagem_padronizada(imagens["aberta"],  altura_personagem)
     clip_aberta2 = imagem_padronizada(imagens["aberta2"], altura_personagem)
     piscar = np.random.randint(1, len(chunks)-2) if duracao > 5 and np.random.rand() < 0.3 else -1
     alternar = True
@@ -124,16 +160,16 @@ def ler_json_legenda(caminho):
         return json.load(f)
 
 def criar_borda_glow(imagem_path, tamanho_alvo):
-    """Carrega a imagem preservando o canal alfa original e redimensiona para o tamanho desejado."""
     img = Image.open(imagem_path).convert("RGBA").resize(tamanho_alvo, Image.LANCZOS)
     rgba = np.array(img)  # H×W×4
     rgb = rgba[..., :3]
-    alpha = rgba[..., 3].astype(np.float32) / 255.0  # 0–1
+    alpha = rgba[..., 3].astype(np.float32) / 255.0
     return rgb, alpha
 
+# ———— PROCESSO ————————————————————————————————
+dialogo, lines_with_image_1b, ord_by_line = ler_dialogo()
+manifest_imgs, manifest_times = carregar_manifest()
 
-
-# ———— INÍCIO DO PROCESSAMENTO ———————————————————————
 falas = construir_lista_falas()
 duracao_total_falas = sum(AudioFileClip(f["audio"]).duration for f in falas)
 
@@ -147,43 +183,45 @@ if fundo_video.duration > duracao_total_falas:
 else:
     inicio = 0
 
-cenas, t_acc = [], 0
+cenas, t_acc = [], 0.0
 for i, f in enumerate(falas):
+    fala_idx = i + 1  # 1-based p/ casar com manifest
     audio_clip = AudioFileClip(f["audio"])
     dur = audio_clip.duration
     fundo_c = fundo_video.subclipped(t_acc, t_acc + dur).with_audio(audio_clip).with_duration(dur)
     pers = animar_personagem_com_audio(f["audio"], dur, f["posicao"], f["imagens"], fundo_w, fundo_h, f["nome"])
 
     imagem_ilustrativa = None
-    imagem_ilustrativa_path = manifest_map.get(i)  # pega o arquivo certo pelo índice da fala
 
-    if imagem_ilustrativa_path and os.path.exists(imagem_ilustrativa_path):
-        print(f"[DEBUG] Adicionando imagem estilizada para fala {i+1}: {imagem_ilustrativa_path}")
-        altura_img = int(fundo_h * 0.4)
-        largura_img = int(altura_img * 0.85)
-        rgb_np, alpha_np = criar_borda_glow(imagem_ilustrativa_path, (largura_img, altura_img))
+    if fala_idx in lines_with_image_1b:
+        img_path = manifest_imgs.get(fala_idx) or fallback_img_for_line(fala_idx, ord_by_line)
+        if img_path and os.path.exists(img_path):
+            t0, t1 = pegar_tempo(fala_idx, dur, manifest_times)
+            print(f"[SYNC] fala {fala_idx:02d} → img={os.path.basename(img_path)} @ {t0:.2f}-{t1:.2f}")
 
-        max_dur = min(3, dur)  # duração da imagem no início da fala
+            altura_img = int(fundo_h * 0.4)
+            largura_img = int(altura_img * 0.85)
+            rgb_np, alpha_np = criar_borda_glow(img_path, (largura_img, altura_img))
 
-        # 🔧 FIX: empilha o alfa (H×W) em 3 canais para o to_mask()
-        alpha_u8 = (alpha_np * 255).astype("uint8")               # H×W (0–255)
-        alpha_rgb = np.dstack([alpha_u8, alpha_u8, alpha_u8])     # H×W×3
+            alpha_u8 = (alpha_np * 255).astype("uint8")
+            alpha_rgb = np.dstack([alpha_u8, alpha_u8, alpha_u8])
+            mask_clip = ImageClip(alpha_rgb).to_mask().with_duration(t1 - t0)
 
-        mask_clip = ImageClip(alpha_rgb).to_mask().with_duration(max_dur)
-
-        imagem_ilustrativa = (
-            ImageClip(rgb_np)
-            .with_mask(mask_clip)
-            .with_start(0.2)  # relativo à cena
-            .with_duration(max_dur)
-            .with_position(("center", int(fundo_h * 0.08)))
-            .with_opacity(0.85)
-        )
-
+            imagem_ilustrativa = (
+                ImageClip(rgb_np)
+                .with_mask(mask_clip)
+                .with_start(t0)
+                .with_duration(t1 - t0)
+                .with_position(("center", int(fundo_h * 0.08)))
+                .with_opacity(0.85)
+            )
+        else:
+            print(f"[WARN] Sem imagem para fala {fala_idx} (esperada pelo diálogo).")
     else:
-        print(f"[DEBUG] Nenhuma imagem ilustrativa para fala {i+1}")
+        # diálogo não pede imagem nesta fala
+        pass
 
-    json_path = f"output/fala_{i+1:02}_words.json"
+    json_path = f"output/fala_{fala_idx:02}_words.json"  # words são 1-based
     if os.path.exists(json_path):
         palavras_json = ler_json_legenda(json_path)
         legenda_clip = gerar_legenda_clip_palavra(palavras_json, fundo_w, fundo_h)
@@ -196,10 +234,16 @@ for i, f in enumerate(falas):
         cena = CompositeVideoClip(camadas, size=(fundo_w, fundo_h)).with_duration(dur)
         cenas.append(cena)
     else:
-        print(f"[AVISO] JSON não encontrado para fala {i+1}")
+        print(f"[AVISO] JSON não encontrado para fala {fala_idx}")
 
     t_acc += dur
 
 video = concatenate_videoclips(cenas)
-video.write_videofile(saida_path, codec="libx264", audio_codec="aac", fps=30,
-                      temp_audiofile="temp-audio.m4a", remove_temp=True)
+video.write_videofile(
+    saida_path,
+    codec="libx264",
+    audio_codec="aac",
+    fps=30,
+    temp_audiofile="temp-audio.m4a",
+    remove_temp=True
+)

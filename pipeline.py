@@ -1,125 +1,203 @@
-import subprocess
-import sys
-import os
-import shutil
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse, subprocess, sys, os, shutil
 from datetime import datetime
+from pathlib import Path
 
-LOG_FILE = "output/log_pipeline.txt"
+LOG_FILE   = Path("output/log_pipeline.txt")
+OUTPUT_DIR = Path("output")
+SCRIPTS_DIR= Path("scripts")
 
-def log(msg):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    os.makedirs("output", exist_ok=True)
-    with open(LOG_FILE, "a") as f:
-        f.write(f"[{timestamp}] {msg}\n")
+# ──────────────────────────────────────────────────────────────────────────────
+# Log
+# ──────────────────────────────────────────────────────────────────────────────
+def log(msg: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"[{ts}] {msg}\n")
     print(msg)
 
-def mover_output_para_backup():
-    hoje = datetime.now().strftime("%Y%m%d")
-    pasta_backup = os.path.join("output", "backups", hoje)
-    os.makedirs(pasta_backup, exist_ok=True)
+# ──────────────────────────────────────────────────────────────────────────────
+# Execução de scripts
+# ──────────────────────────────────────────────────────────────────────────────
+def run_script(script_relpath: str, args=None, interactive=False):
+    """
+    interactive=False -> captura stdout/stderr e grava no log ao final.
+    interactive=True  -> herda stdin do terminal e 'tee' em tempo real para console + log.
+    """
+    if args is None: args = []
+    script_path = SCRIPTS_DIR / script_relpath
+    if not script_path.exists():
+        log(f"❌ Script não encontrado: {script_path}")
+        sys.exit(1)
 
-    for arquivo in os.listdir("output"):
-        caminho = os.path.join("output", arquivo)
-        if os.path.isfile(caminho):
-            shutil.move(caminho, os.path.join(pasta_backup, arquivo))
-    log(f"🗂️ Arquivos antigos movidos para: {pasta_backup}")
+    # -u: sem buffer para o filho, evita travas de output
+    cmd = [sys.executable, "-u", str(script_path)] + args
+    log(f"\n▶ Executando: {' '.join(cmd)}  (interactive={interactive})")
 
-def debug_arquivo(path):
-    if os.path.exists(path):
-        tamanho = os.path.getsize(path)
-        log(f"📄 Arquivo encontrado: {path} ({tamanho} bytes)")
+    if interactive:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        # Herdamos o teclado (stdin=sys.stdin) e coletamos stdout em tempo real
+        with subprocess.Popen(
+            cmd,
+            stdin=sys.stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env
+        ) as proc:
+            # stream para console e log (efeito tee)
+            with open(LOG_FILE, "a", encoding="utf-8") as flog:
+                for line in proc.stdout:
+                    print(line, end="")
+                    flog.write(line)
+            ret = proc.wait()
+        if ret != 0:
+            log(f"❌ Falha ao executar {script_relpath}. Parando pipeline.")
+            sys.exit(1)
     else:
-        log(f"❌ Arquivo NÃO encontrado: {path}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.stdout:
+            log(f"📥 Saída:\n{result.stdout}")
+        if result.stderr:
+            log(f"⚠️ Erros:\n{result.stderr}")
+        if result.returncode != 0:
+            log(f"❌ Falha ao executar {script_relpath}. Parando pipeline.")
+            sys.exit(1)
 
-scripts_iniciais = [
-    ("scripts/news_fetcher.py", []),
-    ("scripts/script_generator.py", []),
-    ("scripts/tts.py", [])
-]
+    log(f"✅ {script_relpath} finalizado com sucesso.")
 
-scripts_intermediarios = [
-    ("scripts/generate_caption.py", [])
-]
+# ──────────────────────────────────────────────────────────────────────────────
+# Utilidades
+# ──────────────────────────────────────────────────────────────────────────────
+def debug_arquivo(p):
+    p = Path(p)
+    if p.exists():
+        log(f"📄 Arquivo encontrado: {p} ({p.stat().st_size} bytes)")
+    else:
+        log(f"❌ Arquivo NÃO encontrado: {p}")
 
-scripts_finais = [
-    ("scripts/generate_subtitles.py", []),
-    ("scripts/video_maker.py", [])
-]
+def mover_output_para_backup():
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dst = OUTPUT_DIR / "backups" / stamp
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in OUTPUT_DIR.glob("*"):
+        if item.name in ["backups", LOG_FILE.name]:
+            continue
+        shutil.move(str(item), str(dst / item.name))
+    log(f"🗂️ Arquivos antigos movidos para: {dst}")
 
-def run_script(script, args):
-    log(f"\n▶ Executando: {script} {' '.join(args)}")
-    result = subprocess.run(["python", script] + args, capture_output=True, text=True)
+# checks
+def check_pos_news_fetch():
+    debug_arquivo("output/noticias_disponiveis.json")
+    debug_arquivo("output/noticia_escolhida.json")
 
-    log(f"📥 Saída:\n{result.stdout}")
-    if result.stderr:
-        log(f"⚠️ Erros:\n{result.stderr}")
+def check_pos_select_news():
+    debug_arquivo("output/noticia_escolhida.json")
 
-    if result.returncode != 0:
-        log(f"❌ Falha ao executar {script}. Parando pipeline.")
-        sys.exit(1)
+def check_pos_script_generator():
+    debug_arquivo("output/dialogo.txt")
+    debug_arquivo("output/dialogo_estruturado.json")
 
-    log(f"✅ {script} finalizado com sucesso.")
+def check_pos_image_prompts():
+    debug_arquivo("output/queries.json")
+    debug_arquivo("output/imagens_manifest.json")
 
-if __name__ == "__main__":
+def check_pos_tts():
+    for mp3 in sorted(Path("output").glob("fala_*.mp3")):
+        debug_arquivo(mp3)
+
+def check_pos_wordstamps():
+    for js in sorted(Path("output").glob("fala_*_words.json")):
+        debug_arquivo(js)
+
+def check_pos_subtitles():
+    debug_arquivo("output/legendas.srt")
+
+def check_pos_video():
+    debug_arquivo("output/video_final.mp4")
+
+def check_pos_caption():
+    debug_arquivo("output/caption.txt")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────────────────────
+def main():
+    ap = argparse.ArgumentParser(description="Pipeline Zero à Tech (com entrada interativa opcional)")
+    ap.add_argument("--no-backup", action="store_true")
+    ap.add_argument("--topic", type=str, default=None, help="Sugere um assunto para o news_fetcher (quando suportado).")
+    ap.add_argument("--auto", action="store_true", help="Seleciona notícia automaticamente (select_news --auto).")
+    ap.add_argument("--pick", "--index", type=int, dest="pick", help="Escolhe a notícia N (select_news --index N).")
+    ap.add_argument("--interactive_all", action="store_true", help="Força todos os passos em modo interativo.")
+    ap.add_argument("--skip-post", action="store_true")
+    args = ap.parse_args()
+
     log("\n🚀 Iniciando pipeline completo...\n")
+    if not args.no_backup:
+        mover_output_para_backup()
 
-    mover_output_para_backup()
+    # 1) news_fetcher
+    nf_args = []
+    if args.topic:
+        nf_args += ["--topic", args.topic]
+    run_script("news_fetcher.py", nf_args, interactive=args.interactive_all)
+    check_pos_news_fetch()
 
-    arquivos_para_verificar = [
-        "output/dialogo.txt",
-        "output/fala_01.mp3",
-        "output/fala_01_words.json",
-        "output/legendas.srt",
-        "output/video_final.mp4"
-    ]
+    # 2) select_news — se você não passou --auto/--pick, entra no modo interativo
+    sn_args = []
+    interactive_select = args.interactive_all
+    if args.pick is not None:
+        sn_args = ["--index", str(args.pick)]
+        interactive_select = False
+    elif args.auto:
+        sn_args = ["--auto"]
+        interactive_select = False
+    else:
+        interactive_select = True  # sem flags -> deixe eu digitar o número aqui na pipeline
 
-    for script, args in scripts_iniciais:
-        run_script(script, args)
+    run_script("select_news.py", sn_args, interactive=interactive_select)
+    check_pos_select_news()
 
-        log("\n🔎 Verificando arquivos esperados após esse passo:")
-        for arquivo in arquivos_para_verificar:
-            debug_arquivo(arquivo)
+    # 3) script_generator
+    run_script("script_generator.py", [], interactive=args.interactive_all)
+    check_pos_script_generator()
 
-    log("\n🧠 Etapa intermediária: gerar todos os _words.json com Whisper")
+    # 4) generate_image_prompts
+    run_script("generate_image_prompts.py", [], interactive=args.interactive_all)
+    check_pos_image_prompts()
 
-    try:
-        from scripts.generate_word_timestamps import extract_word_timestamps
-    except ImportError:
-        log("❌ Erro ao importar 'extract_word_timestamps' de generate_word_timestamps.py")
-        sys.exit(1)
+    # 5) tts
+    run_script("tts.py", [], interactive=args.interactive_all)
+    check_pos_tts()
 
-    mp3_files = sorted([f for f in os.listdir("output") if f.endswith(".mp3") and f.startswith("fala_")])
+    # 6) word-level timestamps
+    run_script("generate_all_word_timestamps.py", [], interactive=args.interactive_all)
+    check_pos_wordstamps()
 
-    for mp3 in mp3_files:
-        audio_path = os.path.join("output", mp3)
-        base = os.path.splitext(mp3)[0]
-        output_json = os.path.join("output", f"{base}_words.json")
+    # 7) subtitles
+    run_script("generate_subtitles.py", [], interactive=args.interactive_all)
+    check_pos_subtitles()
 
-        if not os.path.exists(output_json):
-            log(f"🗣️ Transcrevendo {mp3} com Whisper...")
-            try:
-                extract_word_timestamps(audio_path, output_json)
-                log(f"✅ JSON gerado: {output_json}")
-            except Exception as e:
-                log(f"❌ Erro ao gerar timestamp para {mp3}: {e}")
-        else:
-            log(f"✔️ Já existe: {output_json}")
+    # 8) video
+    run_script("video_maker.py", [], interactive=args.interactive_all)
+    check_pos_video()
 
-    for script, args in scripts_intermediarios:
-        run_script(script, args)
+    # 9) caption
+    run_script("generate_caption.py", [], interactive=args.interactive_all)
+    check_pos_caption()
 
-    for script, args in scripts_finais:
-        run_script(script, args)
-
-        log("\n🔎 Verificando arquivos esperados após esse passo:")
-        for arquivo in arquivos_para_verificar:
-            debug_arquivo(arquivo)
-
-    try:
-        log("\n📲 Iniciando postagem no TikTok...")
-        from scripts.post_tiktok import postar_no_tiktok
-        postar_no_tiktok()
-    except Exception as e:
-        log(f"❌ Erro ao postar no TikTok: {e}")
+    # 10) post
+    if not args.skip_post:
+        run_script("post_tiktok.py", [], interactive=args.interactive_all)
+    else:
+        log("⏭️ Postagem pulada por --skip-post")
 
     log("\n🎉 Pipeline finalizado com sucesso.")
+
+if __name__ == "__main__":
+    main()

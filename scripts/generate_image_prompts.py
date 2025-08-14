@@ -14,6 +14,8 @@ from openai import OpenAI
 # ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Defina OPENAI_API_KEY no .env")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 DIALOGO_JSON_PATH = Path("output/dialogo_estruturado.json")
@@ -80,18 +82,41 @@ def sanitize_prompt(p: str) -> str:
 
     return re.sub(r"\s+", " ", p).strip()
 
+def _to_str(v) -> str:
+    """Converte v em string legível (aceita str/list/tuple/set/dict)."""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (list, tuple, set)):
+        return ", ".join(str(x).strip() for x in v if str(x).strip())
+    if isinstance(v, dict):
+        vals = [str(x).strip() for x in v.values() if str(x).strip()]
+        return ", ".join(vals)
+    return str(v).strip()
+
 def build_style_prefix(plano: Dict[str,Any]) -> str:
     est = plano.get("estilo_global", {}) or {}
-    paleta = est.get("paleta", "").strip()
-    estetica = est.get("estetica", "").strip()
-    nota = est.get("nota", "").strip()
+
+    # Se vier uma LISTA inteira como 'estilo_global', interpreta como paleta:
+    if isinstance(est, list):
+        est = {"paleta": est}
+
+    paleta   = _to_str(est.get("paleta", ""))
+    estetica = _to_str(est.get("estetica", ""))
+    nota     = _to_str(est.get("nota", ""))
+
     parts = []
-    if estetica: parts.append(estetica)
-    if paleta:   parts.append(f"cores: {paleta}")
-    if nota:     parts.append(nota)
+    if estetica:
+        parts.append(estetica)
+    if paleta:
+        parts.append(f"cores: {paleta}")
+    if nota:
+        parts.append(nota)
+
     # regra padrão de clareza/legibilidade
     parts.append("composição centrada, legível em tela pequena, iluminação balanceada")
-    return ", ".join(parts)
+    return ", ".join(p for p in parts if p)
 
 def choose_style_tail(prompt_base: str) -> str:
     """Rabo de prompt conforme tipo: realista x ilustrativo."""
@@ -140,10 +165,23 @@ def main():
         return
 
     plano = load_json(PLANO_JSON_PATH, {"estilo_global": {}, "imagens": []})
+
+    # Blindagem da estrutura do plano
+    if not isinstance(plano, dict):
+        plano = {"estilo_global": {}, "imagens": []}
+    if "estilo_global" not in plano or plano["estilo_global"] is None:
+        plano["estilo_global"] = {}
+    if "imagens" not in plano or not isinstance(plano["imagens"], list):
+        plano["imagens"] = []
+
     style_prefix = build_style_prefix(plano)
 
     # índice -> prompt do plano
-    prompts_por_linha = {it["linha"]: it["prompt"] for it in plano.get("imagens", []) if "linha" in it and "prompt" in it}
+    prompts_por_linha = {
+        it["linha"]: it["prompt"]
+        for it in plano.get("imagens", [])
+        if isinstance(it, dict) and "linha" in it and "prompt" in it
+    }
 
     print(f"🔎 Falas: {len(falas)} | Imagens planejadas: {len(prompts_por_linha)}")
     manifest = {"itens": []}
