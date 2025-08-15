@@ -2,17 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-Focused Context Fetcher — 3 fontes + Top List (Flow Games)
+Focused Context Fetcher — Flow Games Only (últimos 2 dias)
 ----------------------------------------------------------
-- Busca APENAS nas 3 fontes (RSS direto): Flow Games, Adrenaline, Gameplayscassi
-- Extrai corpo do artigo com adapters por domínio
-- [NOVO] Em Flow Games, extrai listas "Top 10" (ex.: jogos mais vendidos da Steam)
+- Busca APENAS no Flow Games (RSS direto)
+- NÃO exige palavra‑chave; lista tudo dos últimos 2 dias
+- Extração de corpo com vários seletores + fallback /amp
+- Extrai listas "Top X" (ex.: jogos mais vendidos na Steam)
 - Salva:
     • output/noticias_disponiveis.json
     • output/noticia_escolhida.json
     • output/contexto_expandido.txt
-    • output/itens_detectados.json   (quando houver promo/%, preço, etc.)
-    • output/top_list.json           (quando encontrar lista ordenada no artigo)
+    • output/itens_detectados.json     (quando detectar promo/preço/%)
+    • output/top_list.json             (quando houver lista ordenada)
 """
 
 from __future__ import annotations
@@ -37,36 +38,35 @@ ITENS_PATH   = OUT_DIR / "itens_detectados.json"
 TOPLIST_PATH = OUT_DIR / "top_list.json"
 
 TIMEOUT = 18
-UA = "Mozilla/5.0 (Linux; Android 14) ZeroATechFocused/2.0 Mobile Safari"
-HDRS = {"User-Agent": UA, "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.7"}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 3 FONTES FIXAS (RSS diretos)
-# ──────────────────────────────────────────────────────────────────────────────
-FEEDS = {
-    "Flow Games":       ["https://flowgames.gg/feed/"],
-    "Adrenaline":       ["https://adrenaline.com.br/rss"],
-    "Gameplayscassi":   ["https://www.gameplayscassi.com.br/feeds/posts/default?alt=rss"],
+UA = "Mozilla/5.0 (Linux; Android 14) ZeroATechFocused/2.1 Mobile Safari"
+HDRS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Adapters de extração por domínio (conteúdo principal)
+# Flow Games apenas
 # ──────────────────────────────────────────────────────────────────────────────
+FLOW_FEED = "https://flowgames.gg/feed/"
+
+# Seletores reforçados (mudanças de tema quebram facilmente)
+FLOW_SELECTORS = [
+    ".entry-content",
+    "article .entry-content",
+    ".post-content",
+    "article .post-content",
+    "article .single__content",
+    ".single__content",
+    ".content-area article",
+    "main article .content",
+]
+
 ADAPTERS = {
-    # Flow Games (WordPress moderno)
     "flowgames.gg": {
-        # Entry content fica nessas áreas; sidebar/vitrines ficam fora
-        "containers": [".entry-content", "article .entry-content", ".post-content", "article .post-content"],
-        "min_len": 280
-    },
-    # Adrenaline
-    "adrenaline.com.br": {
-        "containers": [".article__content", "article .article__content", ".post-content", ".content"],
-        "min_len": 280
-    },
-    # Gameplayscassi (Blogger)
-    "gameplayscassi.com.br": {
-        "containers": [".post-body", ".entry-content", "article", ".post-content"],
+        "containers": FLOW_SELECTORS,
         "min_len": 220
     },
 }
@@ -82,14 +82,8 @@ RE_PLATFORM = re.compile(r"\b(steam|epic|gog|psn|playstation|xbox|nintendo|switc
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
-def now_utc() -> datetime: 
+def now_utc() -> datetime:
     return datetime.now(timezone.utc)
-
-def safe_get(url: str) -> Optional[requests.Response]:
-    try:
-        return requests.get(url, headers=HDRS, timeout=TIMEOUT, allow_redirects=True)
-    except Exception:
-        return None
 
 def domain_of(url: str) -> str:
     try:
@@ -97,26 +91,48 @@ def domain_of(url: str) -> str:
     except Exception:
         return ""
 
+def safe_get(url: str) -> Optional[requests.Response]:
+    try:
+        r = requests.get(url, headers=HDRS, timeout=TIMEOUT, allow_redirects=True)
+        # Alguns servidores retornam 403 com desktop UA; o nosso já é mobile.
+        return r if (r is not None and r.text) else None
+    except Exception:
+        return None
+
 def clean_spaces(s: str) -> str:
     s = re.sub(r"\u00a0", " ", s)  # nbsp
     s = re.sub(r"[ \t]+", " ", s)
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
 
+def _strip_boilerplate(node: BeautifulSoup) -> None:
+    # remove blocos comuns que poluem (newsletter, relacionados, publicidade, iframes, scripts etc.)
+    kill_classes = re.compile(r"(newsletter|related|promo|share|social|breadcrumbs|post-tags|advert|ads|sidebar)", re.I)
+    for tag in node.find_all(["aside","script","style","noscript","iframe","footer","header","nav"]):
+        tag.decompose()
+    for div in node.find_all(attrs={"class": kill_classes}):
+        div.decompose()
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Extração principal do artigo
 # ──────────────────────────────────────────────────────────────────────────────
 def _pull_text_from_container(node: BeautifulSoup, min_len: int) -> str:
+    _strip_boilerplate(node)
     parts: List[str] = []
     # pega <p> e <li> longos dentro do container principal
     for el in node.find_all(["p", "li"]):
         # ignora listagens de "Leia mais" e blocos promocionais óbvios
-        if el.find_parent(attrs={"class": re.compile(r"(related|more|sidebar|promo|newsletter)", re.I)}):
+        if el.find_parent(attrs={"class": re.compile(r"(related|more|promo|newsletter|share)", re.I)}):
             continue
         txt = el.get_text(" ", strip=True)
-        if txt and len(txt) >= 40:
+        if not txt:
+            continue
+        # filtra rodapés típicos ("Leia mais", CTAs)
+        if re.search(r"(leia mais|assine|newsletter|siga-nos|siga-nos|compartilhe)", txt, re.I):
+            continue
+        if len(txt) >= 40:
             parts.append(txt)
-        if sum(len(x) for x in parts) > 18000:
+        if sum(len(x) for x in parts) > 24000:
             break
     txt = "\n".join(parts).strip()
     return txt if len(txt) >= min_len else ""
@@ -130,14 +146,12 @@ def _find_main_container(soup: BeautifulSoup, selectors: List[str]) -> Optional[
     node = soup.find("article") or soup.find(attrs={"role": "main"})
     return node
 
-def extract_article_body(url: str) -> Tuple[str, Optional[BeautifulSoup]]:
-    """Retorna (texto_limpo, soup_do_container) para permitir extrações específicas (ex.: Top 10)."""
+def _extract_from_url_once(url: str) -> Tuple[str, Optional[BeautifulSoup]]:
     r = safe_get(url)
     if not r or not r.text:
         return "", None
     soup = BeautifulSoup(r.text, "html.parser")
     host = domain_of(url)
-
     cfg = ADAPTERS.get(host)
     if cfg:
         container = _find_main_container(soup, cfg["containers"])
@@ -145,60 +159,55 @@ def extract_article_body(url: str) -> Tuple[str, Optional[BeautifulSoup]]:
             txt = _pull_text_from_container(container, cfg["min_len"])
             if txt:
                 return clean_spaces(txt), container
-
-    # fallback geral: varre article/main
+    # fallback geral
     container = soup.find("article") or soup.find(attrs={"role": "main"}) or soup
-    txt = _pull_text_from_container(container, 220)
+    txt = _pull_text_from_container(container, 200)
     return clean_spaces(txt), container
 
+def extract_article_body(url: str) -> Tuple[str, Optional[BeautifulSoup]]:
+    """
+    Tenta extrair do URL "normal". Se vier vazio, tenta fallback no /amp.
+    """
+    txt, container = _extract_from_url_once(url)
+    if txt:
+        return txt, container
+
+    # tenta versão AMP (muitos sites WP têm /amp)
+    amp_url = None
+    if not url.rstrip("/").endswith("/amp"):
+        amp_url = url.rstrip("/") + "/amp"
+        txt2, cont2 = _extract_from_url_once(amp_url)
+        if txt2:
+            return txt2, cont2
+
+    return txt, container  # vazio mesmo
+
 # ──────────────────────────────────────────────────────────────────────────────
-# [NOVO] Extração de listas “Top 10/Top 20” (Flow Games)
+# [Fluxo] Extração de listas “Top X” (Flow Games)
 # ──────────────────────────────────────────────────────────────────────────────
 def _extract_ranked_lists_from_flowgames(container: BeautifulSoup) -> List[Dict[str, Any]]:
-    """
-    Extrai listas ordenadas (ol/li) dentro do conteúdo do artigo.
-    Cada lista vira: {"titulo_lista": "...", "itens": ["1. Nome", "2. Nome", ...]}
-    Heurística:
-      - captura <ol> que esteja DENTRO da .entry-content (já recebemos o container certo)
-      - usa heading/parágrafo imediatamente ANTES como título da lista
-      - numera conforme a ordem real da página
-    """
     results: List[Dict[str, Any]] = []
     if not container:
         return results
-
-    # pega todos <ol> relevantes no container
     for ol in container.find_all("ol"):
-        # ignora listas esvaziadas/curtas
         lis = [li for li in ol.find_all("li", recursive=False)]
         if len(lis) < 3:
             continue
-
-        # título da lista: busca irmão anterior significativo (h2/h3/p forte)
         title = ""
-        prev = ol.find_previous(lambda tag: tag.name in ("h1","h2","h3","p"))
+        prev = ol.find_previous(lambda tag: tag.name in ("h1","h2","h3","p","strong"))
         if prev:
             t = prev.get_text(" ", strip=True)
-            # filtra títulos muito genéricos
-            if t and len(t) >= 8 and not re.search(r"(leia mais|promo|newsletter)", t, re.I):
+            if t and len(t) >= 6 and not re.search(r"(leia mais|promo|newsletter|publicidade)", t, re.I):
                 title = t
-
         itens: List[str] = []
         for idx, li in enumerate(lis, 1):
-            # pega texto do <li>, incluindo links internos, mas só o texto limpo
             txt = li.get_text(" ", strip=True)
-            # limpa sujeiras de âncoras internas
             txt = re.sub(r"\s+", " ", txt).strip(" .;:+-")
-            if not txt:
-                continue
-            # evita “Publicidade” e blocos promocionais
-            if re.search(r"(publicidade|oferta|cupom)", txt, re.I):
+            if not txt or re.search(r"(publicidade)", txt, re.I):
                 continue
             itens.append(f"{idx}. {txt}")
-
         if itens:
             results.append({"titulo_lista": title or "Lista ordenada", "itens": itens})
-
     return results
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -261,43 +270,37 @@ def detect_promo_items(texto: str, limit: int = 24) -> List[Dict[str, str]]:
     return items
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Busca apenas nas 3 fontes
+# Busca Flow Games (sem keyword), últimos N dias (fixo=2 no run)
 # ──────────────────────────────────────────────────────────────────────────────
-def fetch_from_three_sources(keyword: str, max_days: int = 5) -> List[Dict[str, Any]]:
+def fetch_flowgames_only(max_days: int = 2) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
-    k = (keyword or "").lower().strip()
     cutoff = now_utc() - timedelta(days=max_days)
+    d = feedparser.parse(FLOW_FEED)
+    for e in d.entries:
+        title = (getattr(e, "title", "") or "").strip()
+        link  = (getattr(e, "link", "") or "").strip()
+        if not title or not link:
+            continue
 
-    for source, feeds in FEEDS.items():
-        for url in feeds:
-            d = feedparser.parse(url)
-            for e in d.entries:
-                title = (getattr(e, "title", "") or "").strip()
-                link  = (getattr(e, "link", "") or "").strip()
-                if not title or not link:
-                    continue
-                if k and k not in title.lower():
-                    continue
+        # Data
+        pub_dt = None
+        if getattr(e, "published_parsed", None):
+            pub_dt = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
+        elif getattr(e, "updated_parsed", None):
+            pub_dt = datetime(*e.updated_parsed[:6], tzinfo=timezone.utc)
 
-                # Data
-                pub_dt = None
-                if getattr(e, "published_parsed", None):
-                    pub_dt = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
-                elif getattr(e, "updated_parsed", None):
-                    pub_dt = datetime(*e.updated_parsed[:6], tzinfo=timezone.utc)
+        if pub_dt and pub_dt < cutoff:
+            continue
 
-                if pub_dt and pub_dt < cutoff:
-                    continue
-
-                out.append({
-                    "title": title,
-                    "link": link,
-                    "published_raw": getattr(e, "published", "") or getattr(e, "updated", ""),
-                    "published_iso": pub_dt.isoformat() if pub_dt else "",
-                    "source": source,
-                    "snippet": "",
-                    "age_days": round((now_utc() - pub_dt).total_seconds() / 86400, 2) if pub_dt else None
-                })
+        out.append({
+            "title": title,
+            "link": link,
+            "published_raw": getattr(e, "published", "") or getattr(e, "updated", ""),
+            "published_iso": pub_dt.isoformat() if pub_dt else "",
+            "source": "Flow Games",
+            "snippet": "",
+            "age_days": round((now_utc() - pub_dt).total_seconds() / 86400, 2) if pub_dt else None
+        })
 
     out.sort(key=lambda it: it.get("published_iso") or "", reverse=True)
     return out
@@ -315,13 +318,13 @@ def save_toplist_json(toplists):
     if toplists:
         TOPLIST_PATH.write_text(json.dumps(toplists, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def build_context_block(item: Dict[str, Any], keyword: str, max_days: int) -> str:
+def build_context_block(item: Dict[str, Any]) -> str:
     title = item["title"]; link = item["link"]; source = item["source"]
     host  = domain_of(link)
 
     body, container = extract_article_body(link)
 
-    # [NOVO] tenta extrair top lists do Flow Games
+    # tenta extrair top lists do Flow Games
     toplists: List[Dict[str, Any]] = []
     if host == "flowgames.gg" and container is not None:
         toplists = _extract_ranked_lists_from_flowgames(container)
@@ -332,9 +335,9 @@ def build_context_block(item: Dict[str, Any], keyword: str, max_days: int) -> st
     save_items_json(itens)
 
     meta = [
-        "Tema/Categoria: Foco 3-Fontes",
-        f"Query usada: {keyword}",
-        f"Janela de recência: últimos {max_days} dias",
+        "Tema/Categoria: Foco Flow Games",
+        "Query usada: (sem filtro; últimos 2 dias)",
+        "Janela de recência: últimos 2 dias",
         f"Título: {title}",
         f"Fonte: {source}",
         f"Publicado (raw): {item.get('published_raw','')}",
@@ -358,7 +361,7 @@ def build_context_block(item: Dict[str, Any], keyword: str, max_days: int) -> st
     # Observações editoriais úteis para o Script Generator
     notes = []
     if toplists:
-        notes.append("✅ Use a(s) lista(s) acima na ORDEM em que aparecem no artigo.")
+        notes.append("✅ Use a(s) lista(s) acima na ORDEM original do artigo.")
         notes.append("✅ Cite nominalmente os jogos (sem inventar títulos).")
         notes.append("✅ Se houver duas listas (ex.: Brasil e Mundo), identifique no texto curto.")
     if itens:
@@ -379,28 +382,25 @@ def ask(prompt, default=None):
         raise
 
 def run():
-    print("🎯 Focused Fetcher — 3 fontes (Flow Games, Adrenaline, Gameplayscassi)")
-    kw = ask("Palavra‑chave (ex.: steam, ps plus, cblol):", "").strip()
-    while not kw:
-        print("Digite algo curto, ex.: steam")
-        kw = ask("Palavra‑chave:", "").strip()
-    days = ask("Idade máxima em dias (Enter=5):", "5")
-    try:
-        days = int(days)
-    except Exception:
-        days = 5
+    print("🎯 Focused Fetcher — Flow Games (últimos 2 dias)")
+    # janela fixa de 2 dias (pode alterar aqui se quiser)
+    days = 2
 
-    items = fetch_from_three_sources(kw, max_days=days)
+    items = fetch_flowgames_only(max_days=days)
     if not items:
-        print("Nenhum item encontrado nas 3 fontes dentro da janela.")
+        print("Nenhum item do Flow Games encontrado na janela de 2 dias.")
+        save_list([])
         return
+
     save_list(items)
 
+    # exibe tudo que temos (sem filtro de keyword)
     for i, it in enumerate(items, 1):
         age = it.get("age_days")
         age_s = f"{age:.2f}d" if isinstance(age, (int, float)) else "?"
         print(f"[{i}] {it['title']} — {it['source']} — {age_s}")
 
+    # escolhe um para extrair o contexto completo
     try:
         idx = int(ask(f"Escolha (1-{len(items)}) ou 0 para cancelar:", "1"))
     except Exception:
@@ -410,7 +410,7 @@ def run():
 
     chosen = items[idx - 1]
     save_choice(chosen)
-    ctx = build_context_block(chosen, kw, days)
+    ctx = build_context_block(chosen)
     save_context(ctx)
 
     print("\n✅ Contexto salvo em:", CTX_PATH)
