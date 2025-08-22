@@ -195,12 +195,43 @@ def explicar_pista_curta(pistas: List[str]) -> str:
 TECH_HINTS = ("gpu","rtx","dlss","fsr","ray tracing","engine","unreal","unity",
               "api","endpoint","rest","graphql","nuvem","cloud","kubernetes","container","npu","chip")
 
+MEDIA_HINTS = ("filme", "série", "temporada", "episódio", "estreia", "catálogo", "streaming",
+               "trailer", "cinema", "cenas", "pôster", "poster", "netflix", "prime video", "hbo", "max", "disney+")
+
+INFANTIL_HINTS = ("infantil", "criançada", "kids", "desenho", "animação",
+                  "cocomelon", "coComelon", "peppa", "peppa pig", "galinha pintadinha")
+
+# Stopwords para evitar capturar palavras capitalizadas que não são títulos
+MEDIA_STOPWORDS = {
+    "Quais", "Qual", "Idade", "Séries", "Series", "Filmes", "Filme", "Destaque",
+    "Novidades", "Estreias", "Lançamentos", "Temporada", "Episódio", "Episódios",
+    "Animações", "Catálogo", "Streaming"
+}
+
+MEDIA_SINGLEWORD_ALLOWLIST = {
+    # títulos válidos de 1 palavra que podem aparecer
+    "Refém", "Oppenheimer", "Barbie", "Duna", "Elementos", "Moana", "Frozen",
+    "Encanto", "Interstellar", "Tenet"
+}
+
 KNOWN_FRANCHISES = [
     r"call of duty(?:\:?\s*black ops\s*\d+)?",
     r"battlefield\s*\d+",
     r"gta\s*\d+|grand theft auto",
     r"fifa\s*\d+|ea\s*sports fc\s*\d+",
 ]
+
+QUOTED_TITLES_RE = re.compile(r"[\"“”'‘’]([^\"“”'‘’]{2,80})[\"“”'‘’]")
+
+def find_titlecased_chunks(text: str) -> List[str]:
+    t = text or ""
+    out = set()
+    for m in re.finditer(r"\b([A-Z][\w’'\-]+(?:\s+[A-Z0-9][\w’'\-]+){0,6})\b", t):
+        cand = m.group(1).strip()
+        if len(cand) < 3:
+            continue
+        out.add(cand)
+    return list(out)
 
 def find_games_in_text(text: str) -> List[str]:
     t = text or ""
@@ -218,21 +249,46 @@ def find_games_in_text(text: str) -> List[str]:
             out.add(t[m.start():m.end()].strip().title())
     return list(out)
 
-def extract_entities(titulo: str, contexto: str, falas: list, ranking: list):
-    jogos = set()
-    for it in ranking or []:
-        n = (it.get("jogo") or "").strip()
-        if n and len(n.split()) >= 2:
-            jogos.add(n)
-    blob = " ".join([titulo or "", contexto or ""] + [(f.get("fala") or "") for f in falas])
-    for n in find_games_in_text(blob):
-        jogos.add(n)
-    blob_l = blob.lower()
-    techs = {t for t in TECH_HINTS if t in blob_l}
-    return {"jogos": list(jogos), "techs": list(techs)}
+def extract_media_titles_from_text(text: str) -> List[str]:
+    """Extrai títulos de mídia priorizando nomes ENTRE ASPAS. Aceita 1 palavra SÓ se vier entre aspas."""
+    titles = set()
 
-def build_official_queries(nome_jogo: str) -> List[str]:
-    base = nome_jogo.strip()
+    # 1) Prioriza títulos entre aspas
+    for m in QUOTED_TITLES_RE.finditer(text or ""):
+        cand = _clean(m.group(1))
+        if not cand:
+            continue
+        # remove aspas internas/ruído
+        cand = re.sub(r"[“”‘’\"']", "", cand).strip()
+        if cand in MEDIA_STOPWORDS:
+            continue
+        # singleword só se em aspas -> válido aqui
+        titles.add(cand)
+
+    # 2) Fallback: chunks Title Case, filtrando
+    if not titles:
+        for cand in find_titlecased_chunks(text or ""):
+            if cand in MEDIA_STOPWORDS:
+                continue
+            words = cand.split()
+            if len(words) >= 2 or ":" in cand:
+                titles.add(cand)
+            elif cand in MEDIA_SINGLEWORD_ALLOWLIST:
+                titles.add(cand)
+
+    # Ordena por tamanho desc (melhor casar “Duna: Parte Dois” antes de “Parte Dois”)
+    return sorted(titles, key=lambda s: (-len(s), s))
+
+def build_official_queries(nome: str, categoria: str = "jogo") -> List[str]:
+    base = nome.strip()
+    if categoria == "filme":
+        return [
+            f'{base} official poster',
+            f'{base} key art',
+            f'{base} official still',
+            f'{base} wallpaper official',
+        ]
+    # jogos
     return [
         f'{base} press kit',
         f'{base} key art',
@@ -244,16 +300,45 @@ def build_official_queries(nome_jogo: str) -> List[str]:
     ]
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 🎨 Estética fallback
+# 🎨 Estética / prompts
 # ──────────────────────────────────────────────────────────────────────────────
 POP_PALETTE = ["#FF5A5F", "#FFB300", "#2EC4B6", "#3A86FF", "#8338EC", "#0B0F19", "#FFFFFF"]
 
 def enrich_ai_prompt_realista(base: str) -> str:
     palette = ", ".join(POP_PALETTE)
     return (
-        f"{base}. aparência realista de gameplay/arte promocional; pode incluir logo do jogo; "
+        f"{base}. aparência realista de marketing/promocional; "
         f"iluminação cinematográfica; foco nítido; 9:16. Paleta sugerida: {palette}."
     )
+
+def build_fallback_prompt(nome: str, categoria: str = "jogo") -> str:
+    palette = ", ".join(POP_PALETTE)
+    if categoria == "jogo":
+        return (f"cena promocional de {nome}, arte oficial ou key art do jogo. "
+                f"Estilo de marketing, iluminação cinematográfica, foco nítido, 9:16. Paleta: {palette}.")
+    if categoria == "filme":
+        return (f"pôster cinematográfico de {nome}, cena marcante ou capa promocional. "
+                f"Estilo realista, iluminação dramática, 9:16. Paleta: {palette}.")
+    if categoria == "infantil":
+        return (f"ilustração colorida e divertida de {nome}, estilo desenho animado infantil, "
+                f"personagens fofinhos, fundo lúdico, 9:16. Paleta: {palette}.")
+    if categoria == "tech":
+        return (f"metáfora visual de {nome}, chip futurista, nuvem de dados, interface HUD limpa. "
+                f"Iluminação neon, 9:16. Paleta: {palette}.")
+    if categoria == "promo":
+        return (f"arte digital com cartaz de promoção de {nome}, vitrine online, destaque em desconto. "
+                f"Tipografia chamativa, 9:16. Paleta: {palette}.")
+    return f"imagem ilustrativa de {nome}, estilo marketing, 9:16. Paleta: {palette}."
+
+def classify_media_category(name: str, blob_text: str, fala_text: str) -> str:
+    """
+    Retorna 'infantil' se contexto OU a fala tiver pistas infantis, senão 'filme'.
+    """
+    bl = (blob_text or "").lower()
+    fl = (fala_text or "").lower()
+    if any(h in bl for h in INFANTIL_HINTS) or any(h in fl for h in INFANTIL_HINTS):
+        return "infantil"
+    return "filme"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PROMO (opcional)
@@ -374,7 +459,6 @@ PLAIN_MULTI_DIGIT = re.compile(r"(?<![\w-])(\d{2,})(?![\w-])")  # 2+ algarismos,
 
 def _split_int_dec(num_text: str) -> Tuple[int, int | None]:
     s = re.sub(r"\s", "", num_text)
-    # detecta decimal por último separador visível
     last_comma = s.rfind(","); last_dot = s.rfind(".")
     if last_comma > last_dot:
         int_part = re.sub(r"\D", "", s[:last_comma]) or "0"
@@ -385,8 +469,7 @@ def _split_int_dec(num_text: str) -> Tuple[int, int | None]:
     else:
         int_part = re.sub(r"\D", "", s) or "0"
         dec_part = ""
-    ival = int(int_part)
-    dval = None
+    ival = int(int_part); dval = None
     if dec_part:
         d = int(dec_part[:2].ljust(2, "0"))
         dval = d
@@ -418,12 +501,9 @@ def _replace_plain_multi_digit(m: re.Match) -> str:
     return number_to_words_ptbr(n)
 
 def normalize_numbers_for_tts(text: str) -> str:
-    # 1) moedas com símbolo/código → por extenso
     out = CUR_BEFORE_NUM.sub(_replace_cur_before_num, text)
     out = NUM_BEFORE_CUR.sub(_replace_num_before_cur, out)
-    # 2) já terminou moeda, evita duplicar “dólares dólares”
     out = re.sub(r"\b(dólares|reais|euros|libras|ienes|pesos(?:\s\w+)?)\s+\1\b", r"\1", out, flags=re.I)
-    # 3) números com 2+ algarismos isolados → por extenso
     out = PLAIN_MULTI_DIGIT.sub(_replace_plain_multi_digit, out)
     return out
 
@@ -443,7 +523,6 @@ def gerar_dialogo(titulo: str, contexto_completo: str, ranking_itens: List[Dict[
         "NÃO mencione link na descrição, afiliado, cupom, preço especial do link, "
         "ou qualquer CTA comercial. Foque em informação e utilidade."
     )
-    # Regras para TTS
     regra_tts = (
         "Escreva números com DOIS OU MAIS algarismos por extenso (pt-BR). "
         "Para preços, escreva: '<valor por extenso> <moeda por extenso no plural>', usando 'com' para centavos. "
@@ -462,11 +541,7 @@ def gerar_dialogo(titulo: str, contexto_completo: str, ranking_itens: List[Dict[
         ricos = []
         for it in ranking_itens:
             exp = explicar_pista_curta(it.get("pistas", []))
-            ricos.append({
-                "pos": it.get("pos"),
-                "jogo": it.get("jogo"),
-                "motivo_curto": exp
-            })
+            ricos.append({"pos": it.get("pos"), "jogo": it.get("jogo"), "motivo_curto": exp})
         bloco_ranking = "RANKING DETECTADO (use como referência):\n" + json.dumps(ricos, ensure_ascii=False, indent=2)
 
     prompt = f"""
@@ -510,7 +585,30 @@ SAÍDA: JSON puro (array de {{personagem, fala}}).
     return []
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) Plano de imagens
+# 2) Extração de entidades (jogos, tech, mídias)
+# ──────────────────────────────────────────────────────────────────────────────
+def extract_entities(titulo: str, contexto: str, falas: list, ranking: list):
+    jogos = set()
+    for it in ranking or []:
+        n = (it.get("jogo") or "").strip()
+        if n and len(n.split()) >= 2:
+            jogos.add(n)
+
+    blob = " ".join([titulo or "", contexto or ""] + [(f.get("fala") or "") for f in falas])
+    for n in find_games_in_text(blob):
+        jogos.add(n)
+
+    blob_l = blob.lower()
+    techs = {t for t in TECH_HINTS if t in blob_l}
+
+    # Não coletamos mídias globais aqui para não poluir — mídia será por fala
+    return {
+        "jogos": list(jogos),
+        "techs": list(techs),
+    }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3) Plano de imagens (DINÂMICO por fala, com títulos entre aspas)
 # ──────────────────────────────────────────────────────────────────────────────
 def gerar_plano_imagens(titulo: str, contexto_completo: str, falas: list,
                         ranking_itens: list | None = None,
@@ -525,48 +623,82 @@ def gerar_plano_imagens(titulo: str, contexto_completo: str, falas: list,
 
     imagens: List[Dict[str, Any]] = []
     usados_jogos = set()
+    usados_midias = set()
 
     for i, f in enumerate(falas):
         if len(imagens) >= max_imgs:
             break
+
         txt = (f.get("fala") or "")
         txt_l = txt.lower()
 
+        # — A. Jogos específicos citados na FALA —
         alvo_jogo = None
-        for nome in jogos:
-            if nome.lower().split(":")[0] in txt_l and nome not in usados_jogos:
-                alvo_jogo = nome; break
+        for nome in sorted(jogos, key=lambda s: (-len(s), s)):  # maior primeiro
+            base = nome.lower().split(":")[0]
+            if re.search(rf"\b{re.escape(base)}\b", txt_l) and nome not in usados_jogos:
+                alvo_jogo = nome
+                break
         if alvo_jogo:
-            queries = build_official_queries(alvo_jogo)
-            fallback_prompt = enrich_ai_prompt_realista(
-                f"cena estilo marketing de {alvo_jogo}: operador com arma futurista, "
-                f"ambiente de guerra moderna; pode incluir logo oficial; aspecto 9:16"
-            )
+            queries = build_official_queries(alvo_jogo, categoria="jogo")
             imagens.append({
                 "linha": i,
                 "tipo": "official",
                 "official_query": queries[0],
                 "official_queries_extra": queries[1:],
-                "prompt": fallback_prompt,
+                "prompt": build_fallback_prompt(alvo_jogo, "jogo"),
                 "rationale": f"Fala cita '{alvo_jogo}'. Preferir key art/press kit; IA só se não achar oficial."
             })
             usados_jogos.add(alvo_jogo)
             continue
 
+        # — B. Mídias (filmes/séries) citadas explicitamente NA FALA —
+        midias_na_fala = extract_media_titles_from_text(txt)
+        # Se a fala tem pistas de mídia (palavras do domínio), reforça
+        fala_sugere_midias = any(h in txt_l for h in MEDIA_HINTS)
+        if midias_na_fala or fala_sugere_midias:
+            # Escolhe a melhor (maior nome/mais específico)
+            for alvo_mid in midias_na_fala:
+                if alvo_mid in usados_midias:
+                    continue
+                categoria = classify_media_category(alvo_mid, contexto_completo, txt)
+                queries = build_official_queries(alvo_mid, categoria="filme")
+                imagens.append({
+                    "linha": i,
+                    "tipo": "official",
+                    "official_query": queries[0],
+                    "official_queries_extra": queries[1:],
+                    "prompt": build_fallback_prompt(alvo_mid, categoria),
+                    "rationale": f"Fala cita '{alvo_mid}'. Preferir pôster/key art oficial; IA só se não achar oficial. Categoria: {categoria}."
+                })
+                usados_midias.add(alvo_mid)
+                break
+            if i in [img.get("linha") for img in imagens]:
+                continue  # já adicionou imagem nesta fala
+
+        # — C. Tech (metáfora visual) —
         alvo_tech = None
         for t in techs:
-            if t in txt_l:
+            if re.search(rf"\b{re.escape(t)}\b", txt_l):
                 alvo_tech = t; break
         if alvo_tech:
-            pr = enrich_ai_prompt_realista(
-                f"metáfora visual da tecnologia '{alvo_tech}': chip e ondas de dados; "
-                f"painel HUD moderno; pode conter tipografia curta e logo do recurso"
-            )
+            pr = build_fallback_prompt(alvo_tech, "tech")
             imagens.append({
                 "linha": i,
                 "tipo": "ai",
                 "prompt": pr,
                 "rationale": f"Fala menciona tecnologia '{alvo_tech}'."
+            })
+            continue
+
+        # — D. Promo (cartaz digital), heurística leve —
+        if any(h in txt_l for h in PROMO_HINTS):
+            pr = build_fallback_prompt("promoção", "promo")
+            imagens.append({
+                "linha": i,
+                "tipo": "ai",
+                "prompt": pr,
+                "rationale": "Fala menciona promoção/desconto; cartaz digital como reforço visual."
             })
             continue
 
@@ -583,7 +715,7 @@ def gerar_plano_imagens(titulo: str, contexto_completo: str, falas: list,
     imagens.sort(key=lambda x: x["linha"])
     return {
         "estilo_global": {
-            "paleta": "#FF5A5F, #FFB300, #2EC4B6",  # curta
+            "paleta": "#FF5A5F, #FFB300, #2EC4B6",
             "estetica": "animated_soft",
             "nota": "traço grosso, shapes arredondados, cel-shading leve, contraste alto"
         },
@@ -591,7 +723,7 @@ def gerar_plano_imagens(titulo: str, contexto_completo: str, falas: list,
     }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) Aplica plano nas falas (compat legacy)
+# 4) Aplica plano nas falas (compat legacy)
 # ──────────────────────────────────────────────────────────────────────────────
 def aplicar_plano_nas_falas(falas: list, plano: dict) -> list:
     por_linha = {it["linha"]: it for it in plano.get("imagens", [])}
@@ -614,7 +746,7 @@ def aplicar_plano_nas_falas(falas: list, plano: dict) -> list:
 # ──────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
-def main():
+def gerar_dialogo_e_imagens():
     if not ESCOLHA_PATH.exists():
         print("❌ 'output/noticia_escolhida.json' não encontrado.")
         print("   Rode antes:  python3 scripts/context_fetcher.py")
@@ -667,7 +799,7 @@ def main():
         if itens_promocao:
             print(f"🛒 Itens de promoção detectados: {len(itens_promocao)}")
 
-    # 4) diálogo (modelo já incentivado a escrever por extenso)
+    # 4) diálogo
     falas = gerar_dialogo(titulo, contexto_completo, ranking_itens=ranking or None, itens_promocao=itens_promocao or None)
     if not falas:
         print("❌ Nenhum diálogo foi gerado.")
@@ -676,7 +808,7 @@ def main():
     # 🔊 4.1) NORMALIZA FALAS PARA TTS
     falas = normalize_dialog_for_tts(falas)
 
-    # 5) plano de imagens
+    # 5) plano de imagens (por fala, títulos entre aspas, sem “Quais/Filme/Destaque”)
     plano = gerar_plano_imagens(
         titulo, contexto_completo, falas,
         ranking_itens=ranking, max_imgs=None, only_when_entity=True
@@ -698,4 +830,4 @@ def main():
     print(f"✅ Plano de imagens salvo em: {IMAGENS_PLANO_PATH}")
 
 if __name__ == "__main__":
-    main()
+    gerar_dialogo_e_imagens()
