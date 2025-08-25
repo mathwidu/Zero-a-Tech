@@ -6,7 +6,7 @@ import os
 DIALOG_PATH = "output/dialogo.txt"
 OUTPUT_DIR = "output"
 VOZ_JOAO = "Charlie"
-VOZ_ZE = "Daniel"
+VOZ_ZE = "Grandpa Spuds Oxley"
 MODEL_ID = "eleven_multilingual_v2"
 FORMAT = "mp3_44100_128"
 

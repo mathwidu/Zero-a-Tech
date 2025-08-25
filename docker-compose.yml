@@ -1,0 +1,14 @@
+services:
+  talking_head:
+    build: ./services/talking_head
+    container_name: talking_head
+    ports:
+      - "8000:8000"
+    # mapeia modelos, assets e output do host
+    volumes:
+      - ./services/talking_head/models:/app/models:ro
+      - ./assets:/workspace/assets:ro
+      - ./output:/workspace/output
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped

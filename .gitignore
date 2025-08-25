@@ -6,3 +6,4 @@ padronizados/
 __pycache__/
 .env
 .DS_Store
+services/talking_head/models/
