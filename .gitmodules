@@ -1,0 +1,3 @@
+[submodule "services/talking_head/third_party/Wav2Lip"]
+	path = services/talking_head/third_party/Wav2Lip
+	url = https://github.com/Rudrabha/Wav2Lip.git
