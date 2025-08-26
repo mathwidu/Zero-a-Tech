@@ -1,55 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# para logar o comando real que vai rodar (útil p/ debug):
-set -x
 
-APP_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO="$APP_DIR/third_party/Wav2Lip"
+# Uso:
+#   ./run_wav2lip.sh <face_image> <audio_file> [outfile]
+#
+# Config por env (opcional):
+#   CKPT_PATH=/app/checkpoints/wav2lip_gan.pth (ou wav2lip.pth)
+#   PADS="0 15 0 0"
+#   NOSMOOTH=1
+#   RESIZE_FACTOR=1
+#   STATIC_IMAGE=1
+#   FPS=25
 
-FACE="$1"
-AUDIO="$2"
-OUT="$3"
+FACE_IN="${1:?informe a imagem de rosto}"
+AUDIO_IN="${2:?informe o áudio}"
+OUTFILE="${3:-/tmp/wav2lip_out.mp4}"
 
-# escolhe checkpoint
-if [ -f "$APP_DIR/models/wav2lip_gan.pth" ]; then
-  CHK="$APP_DIR/models/wav2lip_gan.pth"
-elif [ -f "$APP_DIR/models/wav2lip.pth" ]; then
-  CHK="$APP_DIR/models/wav2lip.pth"
-else
-  echo "Nenhum checkpoint wav2lip encontrado em $APP_DIR/models"; exit 1
-fi
+CKPT="${CKPT_PATH:-/app/checkpoints/wav2lip_gan.pth}"
+PADS="${PADS:-0 15 0 0}"
+NOSMOOTH="${NOSMOOTH:-1}"
+RESIZE="${RESIZE_FACTOR:-1}"
+STATIC="${STATIC_IMAGE:-1}"
+FPS="${FPS:-25}"
 
-S3FD="$APP_DIR/models/s3fd.pth"
-[ -f "$S3FD" ] || { echo "Faltando $S3FD"; exit 1; }
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
 
-cd "$REPO"
+# 1) Áudio → WAV 16k mono
+ffmpeg -hide_banner -loglevel error -y -i "$AUDIO_IN" -ar 16000 -ac 1 "$TMPDIR/audio.wav"
 
-# Lê o help do inference.py para descobrir quais flags existem nesse fork
-HELP=$(python inference.py -h 2>&1 || true)
+# 2) PNG com alpha → RGB (fundo cinza claro)
+FACE_RGB="$TMPDIR/face_rgb.png"
+python - <<PY
+from PIL import Image
+im = Image.open("$FACE_IN").convert("RGBA")
+bg = Image.new("RGB", im.size, (240,240,240))
+bg.paste(im, mask=im.split()[-1])
+bg.save("$FACE_RGB")
+PY
 
-# --static pode ser um flag simples ou exigir valor (STATIC)
-if echo "$HELP" | grep -q -- "--static STATIC"; then
-  STATIC_ARG=(--static True)
-elif echo "$HELP" | grep -q -- "--static"; then
-  STATIC_ARG=(--static)
-else
-  STATIC_ARG=()
-fi
+# 3) Monta args e roda inference
+ARGS=(--checkpoint_path "$CKPT" --face "$FACE_RGB" --audio "$TMPDIR/audio.wav" --outfile "$OUTFILE" --fps "$FPS")
+if [ "$STATIC" = "1" ]; then ARGS+=(--static); fi
+if [ "$NOSMOOTH" = "1" ]; then ARGS+=(--nosmooth); fi
+if [ -n "$RESIZE" ]; then ARGS+=(--resize_factor "$RESIZE"); fi
 
-# Alguns forks possuem --face_detector, outros não
-if echo "$HELP" | grep -q -- "--face_detector"; then
-  FACEDET_ARG=(--face_detector s3fd)
-else
-  FACEDET_ARG=()
-fi
+read -r P0 P1 P2 P3 <<< "$PADS"
+ARGS+=(--pads "$P0" "$P1" "$P2" "$P3")
 
-python inference.py \
-  --checkpoint_path "$CHK" \
-  --face "$FACE" \
-  --audio "$AUDIO" \
-  --outfile "$OUT" \
-  --pads 0 10 0 0 \
-  --resize_factor 1 \
-  --nosmooth \
-  "${FACEDET_ARG[@]}" \
-  "${STATIC_ARG[@]}"
+python -u /app/inference.py "${ARGS[@]}"
+
+echo "$OUTFILE"

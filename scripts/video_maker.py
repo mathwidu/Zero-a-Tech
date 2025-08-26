@@ -250,9 +250,9 @@ def construir_lista_falas():
         nome = personagens[i % 2]
         imagens = {
             "fechada": f"assets/personagens/{'joao' if nome == 'JOÃO' else 'zebot'}.png",
-            "aberta":  f"assets/personagens/{'joaoaberto' if nome == 'JOÃO' else 'zebot_aberto'}.png",
-            "aberta2": f"assets/personagens/{'joaoaberto' if nome == 'JOÃO' else 'zebot_aberto2'}.png",
-            "piscar":  f"assets/personagens/{'joaoaberto2' if nome == 'JOÃO' else 'zebot_piscar'}.png"
+            "aberta":  f"assets/personagens/{'joaoa_berto' if nome == 'JOÃO' else 'zebot_aberto'}.png",
+            "aberta2": f"assets/personagens/{'joao' if nome == 'JOÃO' else 'zebot'}.png",
+            "piscar":  f"assets/personagens/{'joao' if nome == 'JOÃO' else 'zebot'}.png"
         }
         posicao = "esquerda" if nome == "JOÃO" else "direita"
         lista_falas.append({
@@ -261,7 +261,7 @@ def construir_lista_falas():
             "posicao": posicao,
             "nome": nome
         })
-    return lista_falas[:]
+    return lista_falas[:2]
 
 def ler_json_legenda(caminho):
     with open(caminho, "r", encoding="utf-8") as f:
