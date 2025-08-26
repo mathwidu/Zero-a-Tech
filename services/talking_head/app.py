@@ -3,6 +3,7 @@ import os, tempfile, shutil, subprocess, uuid
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 APP_DIR = Path(__file__).parent.resolve()
 RUN_SH = APP_DIR / "run_wav2lip.sh"
@@ -70,9 +71,16 @@ def talking_head(
         out_path = tmpdir / f"out_{uuid.uuid4().hex}.mp4"
         cmd = [str(RUN_SH), str(face_path.resolve()), str(audio_path.resolve()), str(out_path.resolve())]
         try:
-            subprocess.run(cmd, cwd=APP_DIR, check=True)
+            subprocess.run(
+                cmd,
+                cwd=APP_DIR,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         except subprocess.CalledProcessError as e:
-            raise HTTPException(500, f"Wav2Lip falhou: {e}")
+            msg = (e.stderr or b"").decode(errors="ignore")
+            raise HTTPException(500, f"Wav2Lip falhou: {msg[:500]}")
 
         if not out_path.exists() or out_path.stat().st_size == 0:
             raise HTTPException(500, "Saída não gerada.")
@@ -81,6 +89,8 @@ def talking_head(
             path=str(out_path),
             media_type="video/mp4",
             filename="talking_head.mp4",
+            background=BackgroundTask(_shutil.rmtree, tmpdir, ignore_errors=True),
         )
-    finally:
+    except Exception:
         _shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
