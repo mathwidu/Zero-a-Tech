@@ -261,7 +261,7 @@ def construir_lista_falas():
             "posicao": posicao,
             "nome": nome
         })
-    return lista_falas[:2]
+    return lista_falas[:]
 
 def ler_json_legenda(caminho):
     with open(caminho, "r", encoding="utf-8") as f:
