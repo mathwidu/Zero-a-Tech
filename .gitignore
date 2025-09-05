@@ -9,3 +9,4 @@ __pycache__/
 .DS_Store
 services/talking_head/models/
 output-quiz/
+outputs/

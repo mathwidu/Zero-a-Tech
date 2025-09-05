@@ -78,8 +78,7 @@ def main():
     def humanize(t: str) -> str:
         # micro-ajustes de prosódia: pausas e ênfase
         t = t.replace(":", ": ")
-        if t.lower().startswith("pergunta") and not t.endswith("!"):
-            t = t + " Valendo!"
+        # Não adicionamos mais frases como "Valendo!" após ler a pergunta.
         t = t.replace("?", "? …")
 
         # Normaliza números para segundos: "5 segundos" -> "cinco segundos"

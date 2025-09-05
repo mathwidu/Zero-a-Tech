@@ -43,7 +43,7 @@ def load_questions(count: int):
     return [{"q": it["q"], "opts": it["opts"], "ans": it["ans"]} for it in samples], topic, difficulty
 
 
-def build_segments(category: str, count: int):
+def build_segments(category: str, count: int, no_hook: bool = True):
     qs, topic, difficulty = load_questions(count)
     cat_name = topic or "Conhecimentos Gerais"
     diff_map = {"fácil": "Nível Iniciante", "média": "Nível Intermediário", "difícil": "Nível Expert"}
@@ -51,13 +51,14 @@ def build_segments(category: str, count: int):
 
     # Estrutura: HOOK -> (Q_ASK + COUNTDOWN + REVEAL_EXPLAIN) x N -> CTA
     segments = []
-    segments.append({
-        "type": "HOOK",
-        "text": f"Desafio relâmpago de {cat_name} — {diff_label}! Diz nos comentários quantas você acerta.",
-        "topic": cat_name,
-        "difficulty": difficulty,
-        "difficulty_label": diff_label,
-    })
+    if not no_hook:
+        segments.append({
+            "type": "HOOK",
+            "text": f"Desafio relâmpago de {cat_name} — {diff_label}! Diz nos comentários quantas você acerta.",
+            "topic": cat_name,
+            "difficulty": difficulty,
+            "difficulty_label": diff_label,
+        })
     # Carrega comentários (opcional)
     comments_map = {}
     if COMMENTARY_JSON.exists():
@@ -103,22 +104,12 @@ def build_segments(category: str, count: int):
         # Evita dígito na fala para melhor TTS PT-BR
         "text": "Conta nos comentários quantas você acertou e segue a conta pra parte dois!",
     })
-    return segments
+    return segments, cat_name, difficulty, diff_label
 
 
-def write_manifest_and_script(category: str, count: int):
+def write_manifest_and_script(category: str, count: int, no_hook: bool = True):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    segments = build_segments(category, count)
-    # extrai metadados do HOOK (tópico e dificuldade)
-    topic = "Conhecimentos Gerais"
-    difficulty = "média"
-    diff_label = "Nível Intermediário"
-    for seg in segments:
-        if seg.get("type") == "HOOK":
-            topic = seg.get("topic") or topic
-            difficulty = seg.get("difficulty") or difficulty
-            diff_label = seg.get("difficulty_label") or diff_label
-            break
+    segments, topic, difficulty, diff_label = build_segments(category, count, no_hook=no_hook)
     manifest = {
         "category": category,
         "count": count,
@@ -156,36 +147,7 @@ def write_manifest_and_script(category: str, count: int):
         return str(n)
 
     # Roteiro para TTS — sem comentário antes da pergunta; explicação após resposta
-    def choose_timer_phrase(seconds: int = 5) -> str:
-        s_ext = num_pt(seconds)
-        variants = [
-            f"Valendo! {s_ext} segundos pra responder.",
-            f"Começa o timer de {s_ext} segundos…", 
-            f"Responda nos próximos {s_ext} segundos!", 
-            f"Preparado? {s_ext} segundos, valendo!",
-            f"Tempo na tela: {s_ext} segundos. Vai!",
-        ]
-        # Opcional: deixar o ChatGPT escolher uma variação curtinha
-        if os.getenv("QUIZ_TIMER_VARIANT_OPENAI", "0") == "1":
-            try:
-                from openai import OpenAI
-                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                prompt = (
-                    "Gere UMA variação curtíssima (<= 8 palavras) em português do Brasil para iniciar um cronômetro "
-                    f"de {num_pt(seconds)} segundos. Ex.: 'Valendo! {num_pt(seconds)} segundos pra responder.' Responda só a frase."
-                )
-                resp = client.chat.completions.create(
-                    model=os.getenv("QUIZ_QA_MODEL", "gpt-4o-mini"),
-                    messages=[{"role":"user","content":prompt}],
-                    temperature=0.7,
-                    max_tokens=30,
-                )
-                txt = (resp.choices[0].message.content or "").strip()
-                if 0 < len(txt) <= 60:
-                    return txt
-            except Exception:
-                pass
-        return random.choice(variants)
+    # Removido: não anunciamos mais o cronômetro na fala do narrador.
     lines = []
     for seg in segments:
         t = seg["type"]
@@ -193,7 +155,6 @@ def write_manifest_and_script(category: str, count: int):
             lines.append(f"NARRADOR: {seg['text']}")
         elif t == "Q_ASK":
             idx = seg["index"]
-            phrase = choose_timer_phrase(5)
             # Converte índice da pergunta para extenso para evitar leitura em inglês
             def num_pt(n: int) -> str:
                 unidades = {
@@ -219,7 +180,8 @@ def write_manifest_and_script(category: str, count: int):
                 return str(n)
 
             idx_ext = num_pt(int(idx))
-            lines.append(f"NARRADOR: Pergunta número {idx_ext}: {seg['text']}. {phrase}")
+            # Sem anúncio do timer: pergunta termina e o COUNTDOWN começa logo após
+            lines.append(f"NARRADOR: Pergunta número {idx_ext}: {seg['text']}")
         elif t == "REVEAL_EXPLAIN":
             ans = seg["answer_index"]
             opt = seg["options"][ans]
@@ -239,9 +201,10 @@ def main():
     ap = argparse.ArgumentParser(description="Gera script/manifest de quiz simples")
     ap.add_argument("--category", default="casais", help="casais|filmes|animes|politica")
     ap.add_argument("--count", type=int, default=3, help="quantidade de perguntas")
+    ap.add_argument("--no-hook", action="store_true", default=bool(int(os.getenv("QUIZ_NO_HOOK","1"))), help="Remove segmento de abertura (HOOK)")
     args = ap.parse_args()
 
-    write_manifest_and_script(args.category, args.count)
+    write_manifest_and_script(args.category, args.count, no_hook=args.no_hook)
     print(f"✅ Manifest: {MANIFEST}")
     print(f"✅ Roteiro:  {SCRIPT_TXT}")
 

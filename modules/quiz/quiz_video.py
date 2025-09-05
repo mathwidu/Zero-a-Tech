@@ -250,8 +250,8 @@ def render_question_card(width: int, height: int, text: str):
         if not cand:
             continue
         try:
-            # Começa GRANDE como nas alternativas e reduz até caber
-            font = ImageFont.truetype(cand, max(28, int(height * 0.48)))
+            # Começa 30% menor para evitar cortes em perguntas longas
+            font = ImageFont.truetype(cand, max(28, int(height * 0.336)))
             chosen_font_path = cand
             break
         except Exception:
@@ -263,13 +263,13 @@ def render_question_card(width: int, height: int, text: str):
             return ImageDraw.Draw(Image.new("RGBA", (1,1))).textlength(t, font=f)
         except Exception:
             return f.getlength(t) if hasattr(f,"getlength") else len(t)* (getattr(f,"size",16)*0.6)
-    pad = max(12, int(height*0.10))
+    pad = max(16, int(height*0.16))
     avail_w = width - pad*2
     base_fs = getattr(font,"size",24)
     # Permite reduzir bastante se necessário para sempre caber
-    min_fs = max(12, int(height * 0.12))
-    # Para ficar igual às alternativas, privilegie 2 linhas grandes
-    max_lines = 2
+    min_fs = max(8, int(height * 0.08))
+    # Flexibiliza número de linhas (até 5) para sempre caber
+    max_lines = 3
     fcur = font
     def wrap_lines(text: str, f):
         words = (text or "").split()
@@ -285,6 +285,7 @@ def render_question_card(width: int, height: int, text: str):
         if cur:
             lines.append(" ".join(cur))
         return lines
+    tries = 0
     while True:
         lines = wrap_lines(text, fcur)
         try:
@@ -295,7 +296,7 @@ def render_question_card(width: int, height: int, text: str):
         total_h = len(lines)*line_h
         if len(lines)<=max_lines and total_h <= height - pad*2:
             break
-        next_sz = int(getattr(fcur,"size",base_fs)*0.92)
+        next_sz = int(getattr(fcur,"size",base_fs)*0.90)
         if next_sz >= min_fs:
             # mantém a mesma família de fonte encontrada no início
             if chosen_font_path:
@@ -309,20 +310,30 @@ def render_question_card(width: int, height: int, text: str):
                 except Exception:
                     fcur = ImageFont.load_default()
             continue
-        # não coube com 2 linhas? tenta 3 linhas antes de elipsar
-        if max_lines < 3:
-            max_lines = 3
+        # aumenta número de linhas gradualmente até 5
+        if max_lines < 5:
+            max_lines += 1
             try:
                 fcur = ImageFont.truetype(chosen_font_path or FONT_PATH, getattr(font, "size", base_fs))
             except Exception:
                 fcur = ImageFont.load_default()
             continue
-        # elipse última linha
-        if lines:
-            last = lines[-1]
-            while textlen(last+"…", fcur) > avail_w and len(last)>3:
-                last = last[:-1]
-            lines[-1] = last+"…"
+        # último recurso: permitir reduzir abaixo de min_fs (até 8px) sem elipse
+        if getattr(fcur, "size", base_fs) > 8:
+            tiny = max(8, int(getattr(fcur, "size", base_fs) * 0.9))
+            try:
+                fcur = ImageFont.truetype(chosen_font_path or FONT_PATH, tiny)
+            except Exception:
+                fcur = ImageFont.load_default()
+            tries += 1
+            if tries < 3:
+                continue
+        # se ainda não coube, aceita mais compactação vertical leve
+        try:
+            ascent, descent = fcur.getmetrics()
+            line_h = max(10, int((ascent + descent) * 0.95))
+        except Exception:
+            line_h = max(10, int((getattr(fcur,"size",16)) * 1.0))
         break
     try:
         ascent, descent = fcur.getmetrics()
@@ -376,10 +387,13 @@ def render_header(width: int, height: int, topic: str, duration: float,
     """Header com título central (topic), ícone à esquerda (opcional) e área de animação à direita.
     Retorna um VideoClip RGBA do tamanho (width x height).
     """
-    try:
-        title_font = ImageFont.truetype(FONT_PATH, max(18, int(height * 0.26)))
-    except Exception:
-        title_font = ImageFont.load_default()
+    # Título com shrink-to-fit dentro do painel para evitar cortes
+    def _load_font(sz: int):
+        try:
+            return ImageFont.truetype(FONT_PATH, sz)
+        except Exception:
+            return ImageFont.load_default()
+    title_font = _load_font(max(18, int(height * 0.26)))
 
     # Base: GLASS (backdrop blur do vídeo por trás, se disponível)
     base = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -408,7 +422,7 @@ def render_header(width: int, height: int, topic: str, duration: float,
     # Painel do header — agora fundo branco igual ao cartão da pergunta
     panel = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     pd = ImageDraw.Draw(panel)
-    stroke_w = max(8, int(min(panel_w, panel_h) * 0.04))
+    stroke_w = max(6, int(min(panel_w, panel_h) * 0.035))
     pd.rounded_rectangle([panel_left, panel_top, panel_right, panel_bottom], radius=radius,
                          fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), width=stroke_w)
     # converte RGBA -> RGB + máscara para preservar transparência corretamente
@@ -443,19 +457,41 @@ def render_header(width: int, height: int, topic: str, duration: float,
             icon_img = None
 
     # Título centralizado
-    def textlen(t: str, f):
+    def textbbox_center(txt: str, font) -> tuple:
         try:
-            return draw.textlength(t, font=f)
+            bbox = draw.textbbox((0, 0), txt, font=font)
         except Exception:
-            return f.getlength(t) if hasattr(f, "getlength") else len(t) * (getattr(f, "size", 16) * 0.6)
+            # fallback aproximado
+            w = draw.textlength(txt, font=font) if hasattr(draw, "textlength") else len(txt) * int(getattr(font, "size", 24) * 0.6)
+            h = int(getattr(font, "size", 24) * 1.0)
+            bbox = (0, 0, w, h)
+        bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x = int(panel_left + (panel_w - bw) // 2 - bbox[0])
+        y = int(panel_top + (panel_h - bh) // 2 - bbox[1])
+        return x, y, bw, bh
+
     txt = str(topic or "Pergunta")
-    tw = textlen(txt, title_font)
-    tx = int(panel_left + (panel_w - tw) // 2)
-    ty = int(panel_top + (panel_h - int(getattr(title_font, "size", 24))) // 2) - 2
+    # Shrink-to-fit com padding interno para não encostar na borda
+    pad_x = int(panel_w * 0.06)
+    pad_y = int(panel_h * 0.14)
+    max_w = max(10, panel_w - 2 * pad_x)
+    max_h = max(10, panel_h - 2 * pad_y)
+    while True:
+        tx, ty, bw, bh = textbbox_center(txt, title_font)
+        if bw <= max_w and bh <= max_h:
+            break
+        new_sz = max(12, int(getattr(title_font, "size", 28) * 0.92))
+        if new_sz == getattr(title_font, "size", 28):
+            break
+        title_font = _load_font(new_sz)
+    # Prepara camada de texto separada (para ficar acima da borda animada)
+    text_img = Image.new("RGBA", (width, height), (0,0,0,0))
+    td = ImageDraw.Draw(text_img)
     for dx in (-2, 2):
         for dy in (-2, 2):
-            draw.text((tx + dx, ty + dy), txt, font=title_font, fill=(255,255,255,220))
-    draw.text((tx, ty), txt, font=title_font, fill=(0,0,0,255))
+            td.text((tx + dx, ty + dy), txt, font=title_font, fill=(255,255,255,220))
+    td.text((tx, ty), txt, font=title_font, fill=(0,0,0,255))
+    text_layer_clip = ImageClip(np.array(text_img)).with_duration(duration)
 
     base_arr = np.array(base)
 
@@ -701,6 +737,8 @@ def render_header(width: int, height: int, topic: str, duration: float,
         border = _with_duration(border, duration)
         border = _with_position(border, (panel_left, panel_top))
         final_clip = CompositeVideoClip([final_clip, border], size=(width, height))
+    # Texto por cima de tudo (evita que a borda animada invada o título)
+    final_clip = CompositeVideoClip([final_clip, text_layer_clip], size=(width, height))
 
     return final_clip
 
@@ -1961,7 +1999,7 @@ def main():
                 header_border_stroke=int(args.header_border_stroke),
                 header_border_mode=str(args.header_border_mode),
                 header_border_speed=float(args.header_border_speed),
-                inset_x=int(slice_bg.w * max(0.0, min(0.2, float(args.header_inset_x_ratio)))),
+                inset_x=int(inner_w * max(0.0, min(0.2, float(args.header_inset_x_ratio)))),
                 inset_y=int(header_h * max(0.0, min(0.4, float(args.header_inset_y_ratio)))),
                 glass_alpha=int(max(0, min(255, args.header_glass_alpha))),
                 blur_sigma=float(args.header_blur_sigma),
