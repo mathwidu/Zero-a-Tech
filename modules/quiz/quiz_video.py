@@ -1678,7 +1678,8 @@ def main():
     ap.add_argument("--header-blur-sigma", type=float, default=float(os.getenv("QUIZ_HEADER_BLUR","6.0")), help="Sigma do blur do fundo sob o header")
     ap.add_argument("--header-backdrop-blur", action="store_true", default=bool(int(os.getenv("QUIZ_HEADER_BACKDROP","0"))), help="Aplica blur do vídeo de fundo sob o header (backdrop simulado)")
     ap.add_argument("--sfx-provider", choices=["eleven","none"], default=os.getenv("QUIZ_SFX_PROVIDER","eleven"))
-    ap.add_argument("--sfx-gain", type=float, default=float(os.getenv("QUIZ_SFX_GAIN","0.6")))
+    ap.add_argument("--sfx-gain", type=float, default=float(os.getenv("QUIZ_SFX_GAIN","0.45")))
+    ap.add_argument("--sfx-voice-ratio", type=float, default=float(os.getenv("QUIZ_SFX_VOICE_RATIO","0.38")), help="RMS alvo dos SFX como fração do RMS da voz (0..1)")
     ap.add_argument("--intro-sfx", type=str, default=os.getenv("QUIZ_INTRO_SFX_NAME","melody_intro"), help="Nome do SFX de introdução (melody_intro|message|stinger|...) ")
     ap.add_argument("--intro-sfx-path", type=str, default=os.getenv("QUIZ_INTRO_SFX_PATH",""), help="Caminho de áudio customizado para a introdução")
     ap.add_argument("--outro-sfx", type=str, default=os.getenv("QUIZ_OUTRO_SFX_NAME","melody_outro"), help="Nome do SFX de fechamento (melody_outro|chime|...)")
@@ -1690,6 +1691,11 @@ def main():
     ap.add_argument("--limit-questions", type=int, default=None, help="Renderiza apenas as primeiras K questões")
     ap.add_argument("--no-intro", action="store_true", help="Não renderiza o HOOK (introdução)")
     ap.add_argument("--no-cta", action="store_true", help="Não renderiza o CTA final")
+    # Engajamento imediato: micro‑hook e instant‑countdown
+    ap.add_argument("--micro-hook", type=str, default=os.getenv("QUIZ_MICRO_HOOK", "").strip(), help="Texto curto exibido nos primeiros ~0.6s do vídeo")
+    ap.add_argument("--micro-hook-sec", type=float, default=float(os.getenv("QUIZ_MICRO_HOOK_SEC","0.6")), help="Duração do micro‑hook (s)")
+    ap.add_argument("--micro-hook-sfx", type=str, default=os.getenv("QUIZ_MICRO_HOOK_SFX","ding"), help="SFX do micro‑hook (ex.: ding|stinger)")
+    ap.add_argument("--instant-countdown", action="store_true", default=bool(int(os.getenv("QUIZ_INSTANT_COUNTDOWN","0"))), help="Inicia o COUNTDOWN já no Q_ASK e remove o segmento COUNTDOWN")
     args = ap.parse_args()
 
     DURATIONS = {
@@ -1702,6 +1708,15 @@ def main():
         raise RuntimeError(f"Manifest não encontrado: {MANIFEST}")
     data = json.loads(MANIFEST.read_text(encoding="utf-8"))
     segments_all = [s for s in data.get("segments", []) if s.get("type")]
+    # Mapa COUNTDOWN seconds por índice de questão
+    countdown_secs_by_index = {}
+    for s in segments_all:
+        if s.get("type") == "COUNTDOWN":
+            try:
+                idx = int(s.get("index", 0))
+                countdown_secs_by_index[idx] = int(s.get("seconds", 5))
+            except Exception:
+                pass
 
     # Mapeia índice de áudio original (1..N) para cada segmento com TTS
     audio_types = {"HOOK","Q","Q_ASK","REVEAL","REVEAL_EXPLAIN","CTA"}
@@ -1745,6 +1760,9 @@ def main():
         if args.no_cta:
             # remove últimas ocorrências CTA
             out = [s for s in out if s.get("type") != "CTA"]
+        # Instant COUNTDOWN: remove segmentos COUNTDOWN (será fundido ao Q_ASK)
+        if args.instant_countdown:
+            out = [s for s in out if s.get("type") != "COUNTDOWN"]
         return out
 
     segments = filter_segments(segments_all)
@@ -1788,7 +1806,16 @@ def main():
         if kind == "COUNTDOWN":
             td = float(seg.get("seconds", 5))
         else:
-            td = max(d_audio, DURATIONS.get(kind, d_audio))
+            # No modo instant‑countdown, estende Q_ASK para cobrir ao menos o tempo do contador
+            if args.instant_countdown and kind == "Q_ASK":
+                try:
+                    idx = int(seg.get("index", 0))
+                    secs = int(countdown_secs_by_index.get(idx, 5))
+                except Exception:
+                    secs = 5
+                td = max(d_audio, float(secs))
+            else:
+                td = max(d_audio, DURATIONS.get(kind, d_audio))
         target_durs.append(td)
     total_target = sum(target_durs)
 
@@ -1804,10 +1831,11 @@ def main():
     # monta cenas (texto + imagem opcional por pergunta)
     t = 0.0
     cenas = []
+    first_scene = True
     # cache simples de SFX em memória (numpy) para evitar muitos arquivos abertos
     from moviepy.audio.AudioClip import AudioArrayClip as _AudioArrayClip
-    _sfx_arr_cache: dict[str, tuple[np.ndarray, int]] = {}
-    def _arr_clip_for(path: str, fps: int = 44100):
+    _sfx_arr_cache: dict[str, tuple[np.ndarray, int, float]] = {}
+    def _sfx_cached(path: str, fps: int = 44100) -> tuple[np.ndarray, int, float]:
         arr_fps = fps
         if path not in _sfx_arr_cache:
             ext = Path(path).suffix.lower()
@@ -1836,19 +1864,38 @@ def main():
                         clip.close()
                     except Exception:
                         pass
-            _sfx_arr_cache[path] = (arr, arr_fps)
-        arr, arr_fps = _sfx_arr_cache[path]
-        return _AudioArrayClip(arr, fps=arr_fps)
+            # RMS simples
+            try:
+                rms = float(np.sqrt(np.mean(np.square(arr))))
+            except Exception:
+                rms = 0.1
+            _sfx_arr_cache[path] = (arr, arr_fps, rms)
+        return _sfx_arr_cache[path]
+
+    def _sfx_clip_with_gain(path: str, voice_rms: float, base_gain: float = 1.0) -> _AudioArrayClip:
+        arr, arr_fps, arr_rms = _sfx_cached(path)
+        clip = _AudioArrayClip(arr, fps=arr_fps)
+        # alvo: fração do volume RMS da voz
+        target = float(args.sfx_voice_ratio if hasattr(args, 'sfx_voice_ratio') else 0.38) * max(voice_rms, 0.05)
+        g = target / max(arr_rms, 1e-4)
+        g = max(0.02, min(1.0, g)) * float(args.sfx_gain) * float(base_gain)
+        return _volumex_clip(clip, g)
 
     for idx, (seg, target_d) in enumerate(zip(segments, target_durs), start=1):
         kind = seg.get("type", "Q")
         t_end = min(t + target_d, base.duration - 1e-3)
         slice_bg = _subclip(base, t, t_end)
         # áudio (quando houver)
+        voice_rms = 0.12
         if kind in audio_types:
             aidx = int(seg.get("_audio_idx"))
             apath = OUT_DIR / f"quiz_{aidx:02d}.mp3"
             audio_clip = AudioFileClip(str(apath))
+            try:
+                arr_voice = audio_clip.to_soundarray(fps=44100)
+                voice_rms = float(np.sqrt(np.mean(np.square(arr_voice))))
+            except Exception:
+                voice_rms = 0.12
             slice_bg = _with_audio(slice_bg, audio_clip)
 
         layers = [slice_bg]
@@ -2011,6 +2058,18 @@ def main():
             overlays_after_images.append(head)
             y_cursor = max(y_cursor, top_margin + header_h + gap)
 
+            # Micro‑hook: texto curto logo no início (apenas na 1ª cena)
+            if first_scene and (args.micro_hook or "").strip():
+                mh_text = (args.micro_hook or "").strip()
+                mh_dur = max(0.2, min(float(args.micro_hook_sec), slice_bg.duration))
+                mh_h = int(slice_bg.h * 0.14)
+                mh = render_text_box(int(inner_w), mh_h, mh_text, "HOOK")
+                mh = _with_start(mh, 0)
+                mh = _with_duration(mh, mh_dur)
+                mh_y = int(top_margin + slice_bg.h * 0.02)
+                mh = _with_position(mh, (left_margin, mh_y))
+                overlays_after_images.append(mh)
+
             # pergunta: mede altura necessária
             q_needed = measure_text_height(texto, inner_w, "Q")
             # limites para não estourar
@@ -2079,7 +2138,7 @@ def main():
                     anim_d = max(0.08, int(getattr(args, 'stagger_anim_ms', args.stagger_anim_ms)) / 1000.0)
                     for i, opt in enumerate(opts[:5]):
                         target_x = left_margin + int((inner_w - box_w) // 2)
-                        y_abs = y_cursor_q_end + top + i * (box_h + gap)
+                        y_abs = y_after_q + top + i * (box_h + gap)
                         # constrói a linha
                         row = render_option_row(letters[i], str(opt), inner_w, box_w, box_h,
                                                 reveal=False, is_correct=(i == ans_idx))
@@ -2184,7 +2243,7 @@ def main():
                     tick = sfxmod.get_sfx_path("tick")
                     ticks = []
                     for k in range(seconds):
-                        clip = _with_start(_volumex_clip(AudioFileClip(str(tick)), max(0.05, min(1.0, args.sfx_gain))), float(k))
+                        clip = _with_start(_sfx_clip_with_gain(str(tick), voice_rms, base_gain=0.9), float(k))
                         ticks.append(clip)
                     from moviepy.audio.AudioClip import AudioArrayClip
                     n = max(1, int(44100 * slice_bg.duration))
@@ -2202,6 +2261,104 @@ def main():
                     countdown_audio_mix = beep_mix
                 elif sfx_mix:
                     countdown_audio_mix = sfx_mix
+            elif args.instant_countdown and kind == "Q_ASK":
+                # Funde COUNTDOWN no Q_ASK (ring/beep desde 0s)
+                try:
+                    seconds = int(countdown_secs_by_index.get(int(seg.get("index", 0)), 5))
+                except Exception:
+                    seconds = 5
+                # Visual
+                if args.timer_style == "border":
+                    card_w = int(inner_w)
+                    card_h = q_h
+                    radius = max(28, int(min(card_w, card_h) * 0.10))
+                    tcolors = [c.strip() for c in (args.timer_border_colors or '').split(',') if c.strip()]
+                    border = render_timer_border(card_w, card_h, seconds=seconds, radius=radius, stroke=int(args.timer_border_stroke), colors=tcolors, blink=args.timer_border_blink)
+                    border = _with_start(border, 0)
+                    border = _with_duration(border, slice_bg.duration)
+                    border = _with_position(border, (left_margin, y_cursor))
+                    overlays_after_images.append(border)
+                elif args.timer_style == "ring":
+                    eff_x_ratio = (left_margin + inner_w * max(0.0, min(1.0, float(args.timer_x_ratio)))) / float(slice_bg.w)
+                    ring = render_timer_ring(
+                        slice_bg.w, slice_bg.h, seconds=seconds, scale=args.timer_scale,
+                        x_ratio=eff_x_ratio, y_ratio=float(args.timer_y_ratio)
+                    )
+                    ring = _with_start(ring, 0)
+                    ring = _with_duration(ring, slice_bg.duration)
+                    overlays_after_images.append(ring)
+                elif args.timer_style == "digits":
+                    digits_h = max(int(slice_bg.h * 0.28), int(q_h * 0.9))
+                    digits = render_countdown(slice_bg.w, digits_h, seconds=seconds)
+                    digits = _with_start(digits, 0)
+                    digits = _with_duration(digits, slice_bg.duration)
+                    digits = _with_position(digits, (left_margin, int(top_margin + header_h * 0.5 - digits_h * 0.5)))
+                    overlays_after_images.append(digits)
+                else:
+                    bar_h = max(8, int(slice_bg.h * max(0.02, min(0.2, float(args.timer_bar_height_ratio)))))
+                    colors = [c.strip() for c in (args.timer_bar_colors or '').split(',') if c.strip()]
+                    bar = render_timer_bar(int(inner_w * 0.88), bar_h, seconds=seconds, colors=colors)
+                    bar = _with_start(bar, 0)
+                    bar = _with_duration(bar, slice_bg.duration)
+                    bar = _with_position(bar, (left_margin + int((inner_w - int(inner_w*0.88))//2), y_after_q))
+                    overlays_after_images.append(bar)
+
+                # Escurecimento leve
+                dim_a = max(0.0, min(1.0, args.timer_dim))
+                if dim_a > 0:
+                    dim_arr = np.zeros((slice_bg.h, slice_bg.w, 4), dtype=np.uint8)
+                    dim_arr[:, :, 3] = int(255 * dim_a)
+                    dim_clip = ImageClip(dim_arr)
+                    dim_clip = _with_start(dim_clip, 0)
+                    dim_clip = _with_duration(dim_clip, slice_bg.duration)
+                    dim_clip = _with_position(dim_clip, ("center", "center"))
+                    layers.append(dim_clip)
+
+                # Flashes
+                if args.timer_flash:
+                    flash_dur = max(0.05, int(args.timer_flash_ms) / 1000.0)
+                    for k in range(seconds):
+                        if float(k) >= slice_bg.duration:
+                            break
+                        fl = render_flash(slice_bg.w, slice_bg.h, duration=flash_dur, alpha=args.timer_flash_alpha)
+                        fl = _with_start(fl, float(k))
+                        fl = _with_duration(fl, min(flash_dur, slice_bg.duration))
+                        fl = _with_position(fl, ("center", "center"))
+                        overlays_after_images.append(fl)
+
+                # Mix de áudio instantâneo
+                instant_audio_mix = None
+                from moviepy.audio.AudioClip import AudioArrayClip
+                base_n = max(1, int(44100 * slice_bg.duration))
+                base_silence = AudioArrayClip(np.zeros((base_n, 2), dtype=np.float32), fps=44100)
+                parts = [base_silence]
+                if args.beep:
+                    base_freq = float(args.beep_freq)
+                    mults = [0.9, 1.05, 1.2, 1.4, 1.6]
+                    freqs = [base_freq * mults[min(i, len(mults)-1)] for i in range(seconds)]
+                    for k, f in enumerate(freqs):
+                        if float(k) >= slice_bg.duration:
+                            break
+                        b = render_beep(
+                            frequency=f,
+                            duration=min(args.beep_sec, slice_bg.duration),
+                            volume=max(0.02, min(1.0, args.beep_vol))
+                        )
+                        b = _with_start(b, float(k))
+                        parts.append(b)
+                if args.sfx:
+                    try:
+                        from . import sfx as sfxmod
+                        tick = sfxmod.get_sfx_path("tick")
+                        for k in range(seconds):
+                            if float(k) >= slice_bg.duration:
+                                break
+                            parts.append(_with_start(_sfx_clip_with_gain(str(tick), voice_rms, base_gain=0.9), float(k)))
+                    except Exception:
+                        pass
+                if len(parts) > 1:
+                    instant_audio_mix = CompositeAudioClip(parts)
+                    instant_audio_mix.fps = 44100
             else:
                 # Durante Q/Q_ASK (pré-countdown): anima a borda "enchendo" (fill)
                 if args.timer_style == "border":
@@ -2248,11 +2405,23 @@ def main():
         # aplica o áudio do COUNTDOWN diretamente no composite final
         if kind == "COUNTDOWN" and 'countdown_audio_mix' in locals() and countdown_audio_mix is not None:
             cena = _with_audio(cena, countdown_audio_mix)
+        if args.instant_countdown and kind == "Q_ASK" and 'instant_audio_mix' in locals() and instant_audio_mix is not None:
+            cena = _with_audio(cena, instant_audio_mix)
 
         # SFX em outros segmentos
         if args.sfx:
             from . import sfx as sfxmod
             sfx_overlays = []
+            # micro‑hook ding na primeira cena
+            if first_scene and (args.micro_hook or "").strip():
+                try:
+                    name = (args.micro_hook_sfx or "ding").strip().lower()
+                    micro = Path(sfxmod.get_sfx_path(name))
+                except Exception:
+                    micro = Path(sfxmod.get_sfx_path("ding"))
+                sfx_overlays.append(_with_start(_sfx_clip_with_gain(str(micro), voice_rms, base_gain=1.0), 0.0))
+                print(f"[SFX] MICRO-HOOK: {micro}")
+
             if kind == "HOOK":
                 # prioridade: caminho customizado -> nome escolhido -> fallback 'message' -> 'stinger'
                 intro_path = None
@@ -2269,13 +2438,13 @@ def main():
                             intro_path = Path(sfxmod.get_sfx_path("message"))
                         except Exception:
                             intro_path = Path(sfxmod.get_sfx_path("stinger"))
-                sfx_overlays.append(_with_start(_volumex_clip(_arr_clip_for(str(intro_path)), max(0.05, min(1.0, args.sfx_gain))), 0.0))
+                sfx_overlays.append(_with_start(_sfx_clip_with_gain(str(intro_path), voice_rms, base_gain=1.0), 0.0))
                 print(f"[SFX] HOOK intro: {intro_path}")
             if kind in ("REVEAL", "REVEAL_EXPLAIN"):
                 dn = sfxmod.get_sfx_path("ding")
                 wh = sfxmod.get_sfx_path("whoosh")
-                sfx_overlays.append(_with_start(_volumex_clip(_arr_clip_for(str(dn)), max(0.05, min(1.0, args.sfx_gain))), 0.0))
-                sfx_overlays.append(_with_start(_volumex_clip(_arr_clip_for(str(wh)), max(0.05, min(1.0, args.sfx_gain*0.85))), 0.2))
+                sfx_overlays.append(_with_start(_sfx_clip_with_gain(str(dn), voice_rms, base_gain=1.0), 0.0))
+                sfx_overlays.append(_with_start(_sfx_clip_with_gain(str(wh), voice_rms, base_gain=0.85), 0.2))
                 print(f"[SFX] REVEAL sfx: {dn}, {wh}")
             if kind == "CTA":
                 # prioridade: caminho customizado -> nome escolhido -> fallback 'melody_outro' -> 'chime'
@@ -2293,7 +2462,7 @@ def main():
                             outro_path = Path(sfxmod.get_sfx_path("melody_outro"))
                         except Exception:
                             outro_path = Path(sfxmod.get_sfx_path("chime"))
-                sfx_overlays.append(_with_start(_volumex_clip(_arr_clip_for(str(outro_path)), max(0.05, min(1.0, args.sfx_gain*0.9))), 0.0))
+                sfx_overlays.append(_with_start(_sfx_clip_with_gain(str(outro_path), voice_rms, base_gain=0.9), 0.0))
                 print(f"[SFX] CTA outro: {outro_path}")
             # whoosh por alternativa ao chegar (Q/Q_ASK/COUNTDOWN)
             if kind in ("Q", "Q_ASK", "COUNTDOWN"):
@@ -2309,7 +2478,7 @@ def main():
                         start = float(i)
                     else:
                         start = min(0.22, 0.06 * i)
-                    sfx_overlays.append(_with_start(_volumex_clip(_arr_clip_for(str(opt_path)), max(0.05, min(1.0, args.sfx_gain*0.85))), float(start)))
+                    sfx_overlays.append(_with_start(_sfx_clip_with_gain(str(opt_path), voice_rms, base_gain=0.85), float(start)))
                 if opts_local:
                     print(f"[SFX] OPTIONS sfx x{min(5, len(opts_local))}: {opt_path}")
             if sfx_overlays:
@@ -2324,6 +2493,7 @@ def main():
                 cena = _with_audio(cena, mix)
         cenas.append(cena)
         t += slice_bg.duration
+        first_scene = False
 
     out = concatenate_videoclips(cenas)
     # escolhe FPS de saída

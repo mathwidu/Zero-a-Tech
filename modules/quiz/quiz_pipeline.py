@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Pipeline simplificado para gerar um vídeo de quiz:
-1) Gera roteiro e manifest (quiz_generate)
+"""Pipeline simplificado para gerar um vídeo de quiz.
+
+Etapas:
+1) Gera perguntas+comentários+manifest/roteiro (quiz_generate)
 2) Gera TTS (tts_quiz)
 3) Renderiza vídeo (quiz_video)
 
-Uso:
-  python -m modules.quiz.quiz_pipeline --category casais --count 3
+Observações:
+- Introdução (HOOK) habilitada por padrão no manifesto; use `--no-hook` no gerador para remover.
+- As flags do render permitem ajustar margens do conteúdo, header e animações.
+
+Uso rápido:
+    python -m modules.quiz.quiz_pipeline --topic "programação" --count 5 --difficulty "média"
 """
 
 import argparse
 import subprocess
 import sys
 import os
+import json
+from pathlib import Path
 
 def run(cmd: str):
     print(f"▶ {cmd}")
@@ -70,6 +77,30 @@ def main():
     else:
         print("ℹ️ Etapa de imagens das perguntas desativada (use --images para ativar).")
     run("python -m modules.quiz.tts_quiz")
+    # Apêndice de métricas no log principal (se existir)
+    try:
+        metrics_path = Path("output-quiz/tts_metrics.json")
+        log_path = Path("output-quiz/log_quiz.txt")
+        if metrics_path.exists():
+            m = json.loads(metrics_path.read_text(encoding="utf-8"))
+            total_chars = m.get("total_chars")
+            sub = m.get("subscription", {}) or {}
+            line = f"[TTS] total_chars={total_chars}"
+            if sub:
+                cc = sub.get("character_count")
+                cl = sub.get("character_limit")
+                rem = None
+                try:
+                    rem = int(cl) - int(cc)
+                except Exception:
+                    rem = None
+                line += f" | plan_usage={cc}/{cl} rem={rem}"
+            print(line)
+            if log_path.parent.exists():
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+    except Exception:
+        pass
     run("python -m modules.quiz.quiz_video")
 
 

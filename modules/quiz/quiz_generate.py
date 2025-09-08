@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import argparse, json, os, random
+import argparse, json, os, random, re, time
 from pathlib import Path
 from datetime import datetime, timezone
 
 import json
 from .questions_bank import sample_general_knowledge
+from dotenv import load_dotenv
+try:
+    from openai import OpenAI  # type: ignore
+except Exception:
+    OpenAI = None  # type: ignore
 
 OUT_DIR = Path("output-quiz")
 MANIFEST = OUT_DIR / "quiz_manifest.json"
@@ -43,6 +48,114 @@ def load_questions(count: int):
     return [{"q": it["q"], "opts": it["opts"], "ans": it["ans"]} for it in samples], topic, difficulty
 
 
+def _hook_text_for_topic(topic: str, diff_label: str, count: int) -> str:
+    """Gera um texto de HOOK curto com variações, baseado no tópico e dificuldade."""
+    # Allow full override via env
+    forced = os.getenv("QUIZ_HOOK_FORCE", "").strip()
+    if forced:
+        return forced
+    tpl = [
+        f"Desafio relâmpago de {{topic}} — {{diff}}! Quantas você acerta?",
+        f"Valendo! Quiz de {{topic}} ({{diff}}).",
+        f"{{count}} perguntas de {{topic}} — {{diff}}. Pronto?",
+        f"Quanto você manja de {{topic}}? {{diff}}.",
+        f"{{topic}} na veia — {{diff}}. Responde rápido!",
+        f"Se você curte {{topic}}, prova agora — {{diff}}.",
+    ]
+    var = (os.getenv("QUIZ_HOOK_VARIANT", "random") or "random").strip().lower()
+    idx = None
+    if var.isdigit():
+        try:
+            idx = max(0, min(len(tpl)-1, int(var)))
+        except Exception:
+            idx = None
+    if idx is None:
+        idx = random.randrange(len(tpl))
+    s = tpl[idx]
+    return s.replace("{topic}", topic).replace("{diff}", diff_label).replace("{count}", str(count))
+
+
+def _hook_candidates_via_openai(topic: str, difficulty: str, diff_label: str, count: int) -> list[str] | None:
+    """Gera variações de HOOK via OpenAI. Retorna lista de 3-6 frases curtas.
+    Regras:
+    - PT-BR, 1 frase por variação (7-14 palavras, sem emoji/hashtag)
+    - Deve mencionar: desafio + nível (diff_label)
+    - Deve induzir retenção: diga que "a última é a mais difícil" e "feita para gênios da área"
+    - Sem citações, sem markdown, sem números de lista.
+    """
+    try:
+        load_dotenv()
+        key = os.getenv("OPENAI_API_KEY")
+        if not key or OpenAI is None:
+            return None
+        model = os.getenv("QUIZ_HOOK_MODEL", os.getenv("QUIZ_QA_MODEL", "gpt-4o-mini"))
+        temp = float(os.getenv("QUIZ_HOOK_TEMP", os.getenv("QUIZ_QA_TEMP", "0.8")))
+        n_vars = max(3, min(8, int(os.getenv("QUIZ_HOOK_VARIATIONS", "5"))))
+        client = OpenAI(api_key=key)
+        system = (
+            "Você escreve ganchos (HOOKs) curtos e impactantes em PT-BR para vídeos de quiz (TikTok/Shorts). "
+            "Objetivo: prender atenção no primeiro segundo."
+        )
+        user = {
+            "topic": topic,
+            "difficulty": difficulty,
+            "difficulty_label": diff_label,
+            "count": count,
+            "instructions": [
+                "Escreva de 3 a 6 variações curtas (1 frase cada).",
+                "7–14 palavras por variação, sem emojis, hashtags ou markdown.",
+                "Mencione que é um desafio e cite o nível (difficulty_label).",
+                "Inclua sempre a mensagem: a última é a mais difícil e feita para gênios da área.",
+                "Evite promessas absolutas; mantenha tom enérgico e bem-humorado.",
+                "Retorne como linhas separadas (uma por linha), sem numeração.",
+            ],
+            "examples": [
+                f"Desafio relâmpago de {topic} — {diff_label}. A última é para gênios, fica até o fim!",
+                f"Valendo! Quiz de {topic} ({diff_label}); a última é casca grossa, só gênio passa.",
+            ],
+            "n": n_vars,
+        }
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role":"system","content":system},{"role":"user","content":json.dumps(user, ensure_ascii=False)}],
+            temperature=max(0.1, min(1.0, temp)),
+            max_tokens=400,
+        )
+        content = resp.choices[0].message.content or ""
+        # Quebra por linhas não vazias, limpa aspas
+        lines = [re.sub(r'^[\s\-\d\.)]+', '', ln.strip().strip('"\'')) for ln in content.splitlines()]
+        lines = [ln for ln in lines if ln]
+        # Filtra tamanho (4..22 palavras)
+        def wc(s: str) -> int: return len(re.findall(r"\w+", s, flags=re.UNICODE))
+        lines = [ln for ln in lines if 4 <= wc(ln) <= 22]
+        # Remove duplicadas aproximadas
+        uniq = []
+        seen = set()
+        for ln in lines:
+            base = re.sub(r"\W+", " ", ln.lower()).strip()
+            if base in seen:
+                continue
+            seen.add(base)
+            uniq.append(ln)
+        return uniq[:n_vars] or None
+    except Exception:
+        return None
+
+
+def gen_hook_text(topic: str, difficulty: str, diff_label: str, count: int) -> tuple[str, list[str]]:
+    """Gera HOOK via OpenAI com fallback local. Retorna (escolhido, candidatos)."""
+    forced = os.getenv("QUIZ_HOOK_FORCE", "").strip()
+    if forced:
+        return forced, [forced]
+    cands = _hook_candidates_via_openai(topic, difficulty, diff_label, count) or []
+    if not cands:
+        # fallback local variado
+        fallback = _hook_text_for_topic(topic, diff_label, count)
+        return fallback, [fallback]
+    chosen = random.choice(cands)
+    return chosen, cands
+
+
 def build_segments(category: str, count: int, no_hook: bool = True):
     qs, topic, difficulty = load_questions(count)
     cat_name = topic or "Conhecimentos Gerais"
@@ -52,9 +165,10 @@ def build_segments(category: str, count: int, no_hook: bool = True):
     # Estrutura: HOOK -> (Q_ASK + COUNTDOWN + REVEAL_EXPLAIN) x N -> CTA
     segments = []
     if not no_hook:
+        hook_text, hook_variants = gen_hook_text(cat_name, difficulty, diff_label, count)
         segments.append({
             "type": "HOOK",
-            "text": f"Desafio relâmpago de {cat_name} — {diff_label}! Diz nos comentários quantas você acerta.",
+            "text": hook_text,
             "topic": cat_name,
             "difficulty": difficulty,
             "difficulty_label": diff_label,
@@ -118,6 +232,7 @@ def write_manifest_and_script(category: str, count: int, no_hook: bool = True):
         "topic": topic,
         "difficulty": difficulty,
         "difficulty_label": diff_label,
+        "hook_variants": hook_variants if 'hook_variants' in locals() else [],
     }
     MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -201,7 +316,8 @@ def main():
     ap = argparse.ArgumentParser(description="Gera script/manifest de quiz simples")
     ap.add_argument("--category", default="casais", help="casais|filmes|animes|politica")
     ap.add_argument("--count", type=int, default=3, help="quantidade de perguntas")
-    ap.add_argument("--no-hook", action="store_true", default=bool(int(os.getenv("QUIZ_NO_HOOK","1"))), help="Remove segmento de abertura (HOOK)")
+    # HOOK agora habilitado por padrão (QUIZ_NO_HOOK=0). Use --no-hook para remover.
+    ap.add_argument("--no-hook", action="store_true", default=bool(int(os.getenv("QUIZ_NO_HOOK","0"))), help="Remove segmento de abertura (HOOK)")
     args = ap.parse_args()
 
     write_manifest_and_script(args.category, args.count, no_hook=args.no_hook)

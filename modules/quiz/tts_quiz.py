@@ -7,20 +7,29 @@ TTS simplificado para o módulo de quiz.
 - Gera arquivos output-quiz/quiz_XX.mp3 usando ElevenLabs.
 """
 
-import os, time, random, re
+import os, time, random, re, subprocess, shutil
 from pathlib import Path
 from dotenv import load_dotenv
+import json
+import requests
 from elevenlabs.client import ElevenLabs
 from elevenlabs.core.api_error import ApiError
 from gtts import gTTS
 
 SCRIPT_TXT = Path("output-quiz/quiz_script.txt")
 OUT_DIR = Path("output-quiz")
+METRICS_JSON = OUT_DIR / "tts_metrics.json"
 
 # Ajuste a voz padrão aqui (precisa existir na sua conta ElevenLabs)
 VOZ_NARRADOR = os.environ.get("QUIZ_TTS_VOICE", "Charlie")
 MODEL_ID = os.environ.get("QUIZ_TTS_MODEL", "eleven_multilingual_v2")
 FORMAT = os.environ.get("QUIZ_TTS_FORMAT", "mp3_44100_128")
+
+# Novo: controle de extroversão e velocidade
+EXTROVERT = bool(int(os.environ.get("QUIZ_TTS_EXTROVERT", "1")))
+# Velocidade padrão ajustada: ~20% mais rápido (em vez de 50%)
+# Para ficar ~20% mais lento que o original, use 0.8
+SPEEDUP = float(os.environ.get("QUIZ_TTS_SPEEDUP", "1.2"))
 
 
 def ler_linhas():
@@ -35,6 +44,62 @@ def ler_linhas():
         else:
             saidas.append(l)
     return saidas
+
+def _atempo_chain(rate: float) -> str:
+    """Constrói cadeia de filtros atempo válida para o FFmpeg.
+    Suporta valores fora de 0.5..2 encadeando múltiplos atempo.
+    """
+    rate = float(rate)
+    if rate <= 0:
+        return "atempo=1.0"
+    parts = []
+    r = rate
+    # acima de 2.0: divide por 2 até cair no intervalo
+    while r > 2.0:
+        parts.append("atempo=2.0")
+        r /= 2.0
+    # abaixo de 0.5: multiplica por 2 (equivale a usar 0.5 várias vezes)
+    while r < 0.5:
+        parts.append("atempo=0.5")
+        r /= 0.5
+    parts.append(f"atempo={max(0.5, min(2.0, r)):.3f}")
+    return ",".join(parts)
+
+def _speedup_audio_file(path: Path, rate: float) -> bool:
+    """Acelera o áudio via ffmpeg atempo, substituindo o arquivo no lugar.
+    Retorna True se conseguiu aplicar ou se rate≈1; False se não conseguiu.
+    """
+    try:
+        rate = float(rate)
+    except Exception:
+        rate = 1.0
+    if rate <= 0 or abs(rate - 1.0) < 1e-3:
+        return True
+    if shutil.which("ffmpeg") is None:
+        print("⚠️ FFmpeg não encontrado no PATH — mantendo velocidade original.")
+        return False
+    try:
+        tmp = path.with_suffix(".tmp.mp3")
+        flt = _atempo_chain(rate)
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", str(path),
+            "-filter:a", flt,
+            "-vn", str(tmp)
+        ]
+        subprocess.run(cmd, check=True)
+        # troca atômica simples
+        tmp.replace(path)
+        print(f"🚀 Velocidade aplicada {rate:.2f}x -> {path.name}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Falha ao acelerar áudio ({rate}x) para {path}: {e}")
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        return False
 
 
 def main():
@@ -78,8 +143,13 @@ def main():
     def humanize(t: str) -> str:
         # micro-ajustes de prosódia: pausas e ênfase
         t = t.replace(":", ": ")
-        # Não adicionamos mais frases como "Valendo!" após ler a pergunta.
-        t = t.replace("?", "? …")
+        # Pausas e pontuação: não inserir reticências após "?" (evita leitura estranha)
+        # Normaliza espaços em torno de "?" e remove reticências
+        t = t.replace("…", ", ")
+        t = re.sub(r"\s*\?\s*", "?", t)
+        # Colapsa pontuação repetida tipo "??" ou "!?" para uma interrogação
+        t = t.replace("?!", "?")
+        t = re.sub(r"[!?]{2,}", "?", t)
 
         # Normaliza números para segundos: "5 segundos" -> "cinco segundos"
         def repl_seg(match: re.Match) -> str:
@@ -109,23 +179,63 @@ def main():
             punct = m.group(3) or ""
             return f"{word} {num_pt(num)}{punct}"
         t = re.sub(r"\b([Pp]arte)\s+(\d{1,2})([!?.])?\b", repl_parte, t)
+
+        if EXTROVERT:
+            # Aumenta energia: mais ênfase e interjeições leves
+            txt = t.strip()
+            lower = txt.lower()
+            # Perguntas
+            if lower.startswith("pergunta número"):
+                # substitui o primeiro ':' por '!'
+                parts = list(txt)
+                try:
+                    i = txt.index(":")
+                    parts[i] = "!"
+                    txt = "".join(parts)
+                except ValueError:
+                    pass
+                if not txt.endswith(("!", "?", ".")):
+                    txt += "!"
+                # adiciona um gatilho curto
+                if not txt.endswith(" Valendo!"):
+                    txt += " Valendo!"
+            # Revelação da resposta
+            elif lower.startswith("resposta correta"):
+                if not txt.endswith(("!", "?", ".")):
+                    txt += "!"
+                if not any(w in lower for w in ["mandou bem", "boa", "acertou"]):
+                    txt += " Mandou bem!"
+            # CTA
+            elif "comentários" in lower or "comentarios" in lower:
+                if not txt.endswith(("!", "?", ".")):
+                    txt += "!"
+            return txt
         return t
 
     max_retries = int(os.getenv("QUIZ_TTS_MAX_RETRIES", "5"))
     base_sleep = float(os.getenv("QUIZ_TTS_RETRY_BASE", "2.0"))
 
+    # Métricas agregadas desta execução
+    metrics = {"provider": "elevenlabs", "total_chars": 0, "items": []}
+
+    def human_text_and_chars(raw: str) -> tuple[str, int]:
+        ht = humanize(raw)
+        return ht, len(ht)
+
     for i, texto in enumerate(textos, start=1):
         print(f"🎙️ Narrador: {texto}")
+        htext, n_chars = human_text_and_chars(texto)
         payload = dict(
-            text=humanize(texto),
+            text=htext,
             voice_id=voice.voice_id,
             model_id=MODEL_ID,
             output_format=FORMAT,
             voice_settings={
-                "stability": float(os.getenv("QUIZ_TTS_STABILITY", 0.4)),
+                # Extroversão: menos estabilidade (mais variação) e style mais alto
+                "stability": float(os.getenv("QUIZ_TTS_STABILITY", 0.30)),
                 "similarity_boost": float(os.getenv("QUIZ_TTS_SIMILARITY", 0.9)),
                 # Alguns planos/vozes aceitam estes campos; ignorados se não suportados
-                "style": float(os.getenv("QUIZ_TTS_STYLE", 0.35)),
+                "style": float(os.getenv("QUIZ_TTS_STYLE", 0.90)),
                 "use_speaker_boost": bool(int(os.getenv("QUIZ_TTS_SPEAKER_BOOST", "1"))),
             },
         )
@@ -140,6 +250,15 @@ def main():
                         f.write(chunk)
                 success = True
                 print(f"✅ {out_path}")
+                # Aceleração de fala (pós-processamento)
+                _speedup_audio_file(out_path, SPEEDUP)
+                metrics["total_chars"] += n_chars
+                metrics["items"].append({
+                    "index": i,
+                    "file": str(out_path),
+                    "chars": n_chars,
+                    "provider": "elevenlabs",
+                })
                 break
             except ApiError as e:
                 if getattr(e, "status_code", None) == 429:
@@ -158,11 +277,56 @@ def main():
             # Fallback para gTTS (pt-br) para não travar pipeline
             try:
                 print("🔁 Fallback gTTS (pt-BR)…")
-                tts = gTTS(text=humanize(texto), lang="pt", tld="com.br")
+                tts = gTTS(text=htext, lang="pt", tld="com.br")
                 tts.save(str(out_path))
                 print(f"✅ (fallback) {out_path}")
+                _speedup_audio_file(out_path, SPEEDUP)
+                metrics["total_chars"] += n_chars
+                metrics["items"].append({
+                    "index": i,
+                    "file": str(out_path),
+                    "chars": n_chars,
+                    "provider": "gtts",
+                })
             except Exception as e:
                 raise RuntimeError(f"Falha no TTS (ElevenLabs e fallback gTTS): {e}")
+
+    # Tenta obter uso de caracteres da assinatura ElevenLabs (se rede disponível)
+    def try_fetch_subscription() -> dict:
+        out = {}
+        try:
+            resp = requests.get(
+                os.getenv("ELEVEN_USER_ENDPOINT", "https://api.elevenlabs.io/v1/user"),
+                headers={"xi-api-key": os.getenv("ELEVEN_API_KEY", ""), "accept": "application/json"},
+                timeout=10,
+            )
+            if resp.ok:
+                data = resp.json()
+                sub = data.get("subscription") or {}
+                out = {
+                    "character_count": sub.get("character_count"),
+                    "character_limit": sub.get("character_limit"),
+                    "can_extend_character_limit": sub.get("can_extend_character_limit"),
+                }
+        except Exception:
+            pass
+        return out
+
+    sub = try_fetch_subscription()
+    if sub:
+        metrics["subscription"] = sub
+
+    # Salva métricas em JSON
+    try:
+        METRICS_JSON.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"📊 TTS métricas salvas em {METRICS_JSON}: total_chars={metrics['total_chars']}")
+        if sub:
+            rem = None
+            if sub.get("character_limit") is not None and sub.get("character_count") is not None:
+                rem = int(sub["character_limit"]) - int(sub["character_count"])
+            print(f"📈 ElevenLabs uso: {sub.get('character_count')}/{sub.get('character_limit')} (restante ~{rem})")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

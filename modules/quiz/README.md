@@ -38,7 +38,7 @@ Saídas ficam em `output-quiz/`.
 2) Comentários
 - `python -m modules/quiz/quiz_commentary_gen`
 3) Manifest/roteiro
-- `python -m modules/quiz/quiz_generate --category geral --count 5`
+- `python -m modules/quiz/quiz_generate --category geral --count 5` (por padrão, COM introdução — HOOK habilitado e gerado via ChatGPT)
 4) Capa (texto embutido)
 - `python -m modules/quiz/quiz_intro_cover`
 5) Imagens (opcional)
@@ -53,6 +53,9 @@ Saídas ficam em `output-quiz/`.
   - `--only-q N`: renderiza só a questão N.
   - `--limit-questions K`: primeiras K questões.
   - `--no-intro`, `--no-cta`.
+  - Engajamento imediato:
+    - `--micro-hook "Acerta essa? Valendo!" --micro-hook-sec 0.6` (texto curtíssimo no 1º segundo)
+    - `--instant-countdown` (inicia o COUNTDOWN no mesmo segmento da pergunta; remove o segmento separado)
 - Timer:
   - `--timer-style ring|digits` (padrão: ring)
   - `--timer-scale 1.15` (tamanho do ring)
@@ -63,6 +66,19 @@ Saídas ficam em `output-quiz/`.
   - `--beep-freq 1000`, `--beep-sec 0.25`, `--beep-vol 0.32`
 - Fundo/encode:
   - `--bg-mode crop|blur`, `--crf 18`, `--preset slow` ou `--bitrate 10M`, `--fps 30`
+
+## Layout — margens e header
+- Margens globais do conteúdo: `--content-margin-x-ratio 0.10 --content-margin-y-ratio 0.10`
+- Header:
+  - `--header-ratio 0.115`
+  - `--header-inset-x-ratio 0.04 --header-inset-y-ratio 0.12`
+  - Borda giratória: `--header-border-mode spin --header-border-stroke 6 --header-border-speed 0.08`
+  - Animações: `--header-right-anim-path assets/animation/lampada.gif`; esquerda por tema em `assets/animation/<slug>/`.
+
+## TTS — comportamento
+- O narrador não anuncia mais o cronômetro; o COUNTDOWN começa logo após a pergunta.
+- Normalização de pontuação evita leitura de `?…` e combinações como `??`/`?!`.
+- Velocidade padrão: ~1.2x (20% mais rápida). Para mais lento (ex.: 0.8x), defina `QUIZ_TTS_SPEEDUP=0.8`.
 
 ## Imagens (opcional)
 - OpenAI (gpt-image-1): `1024x1024`, `1024x1536`, `1536x1024` ou `auto`.
@@ -98,3 +114,10 @@ Saídas ficam em `output-quiz/`.
   - `python -m modules/quiz/quiz_video --bg-mode blur --crf 18 --preset slow`
 - Timer mais impactante:
   - `python -m modules/quiz/quiz_video --timer-scale 1.25 --timer-flash --beep-vol 0.6`
+- Variação de HOOK por vídeo (baseado no tema):
+  - HOOK é gerado via ChatGPT em PT‑BR, curto e chamando para retenção.
+  - Pede explicitamente: “desafio {nível}” e “a última é a mais difícil, feita para gênios da área”.
+  - Parâmetros:
+    - `QUIZ_HOOK_MODEL` (default: `gpt-4o-mini`), `QUIZ_HOOK_TEMP` (default: 0.8), `QUIZ_HOOK_VARIATIONS` (3–8, default 5)
+    - Forçar texto: `QUIZ_HOOK_FORCE="Seu texto aqui"`
+    - Fallback local (sem API): mantemos variações internas por tema/dificuldade.
